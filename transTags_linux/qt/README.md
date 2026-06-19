@@ -46,6 +46,7 @@ After running `./install_desktop_entry.sh`, you can also launch `transTags Linux
 - `Alt + Down`: lock/unlock always-on-top.
 - `Ctrl + Numpad 5`: center the active window.
 - `Alt + N`: create a new sticky note.
+- `Alt + T`: show the settings window.
 
 ## Sticky Notes
 

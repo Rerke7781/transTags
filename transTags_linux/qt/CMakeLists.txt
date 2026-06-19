@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Sql)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(X11 REQUIRED x11 xfixes xext)
 
@@ -19,5 +19,6 @@ target_compile_options(transTags_linux PRIVATE ${X11_CFLAGS_OTHER})
 target_link_libraries(transTags_linux PRIVATE
     Qt6::Widgets
     Qt6::Sql
+    Qt6::Network
     ${X11_LIBRARIES}
 )

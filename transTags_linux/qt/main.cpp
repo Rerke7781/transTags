@@ -15,7 +15,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
-#include <QLockFile>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QMap>
 #include <QMenu>
 #include <QMessageBox>
@@ -38,6 +39,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector>
+#include <QWidget>
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -57,6 +59,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -66,8 +69,10 @@ constexpr unsigned long kOpacityMin = 0x19191919UL;
 constexpr int kMaxTrackedWindows = 64;
 constexpr long kNetWmStateRemove = 0;
 constexpr long kNetWmStateAdd = 1;
+constexpr const char *kInstanceServerName = "/tmp/transTags_linux_instance.sock";
 
 int g_signalSockets[2] = {-1, -1};
+constexpr const char *kUtilityWindowProperty = "TRANSTAGS_UTILITY_WINDOW";
 
 void handleUnixSignal(int)
 {
@@ -110,6 +115,63 @@ QString sessionType()
 {
     const QByteArray value = qgetenv("XDG_SESSION_TYPE");
     return value.isEmpty() ? QStringLiteral("unknown") : QString::fromLocal8Bit(value);
+}
+
+void markTransTagsUtilityWindow(QWidget *widget)
+{
+    if (!widget)
+        return;
+
+    Display *display = XOpenDisplay(nullptr);
+    if (!display)
+        return;
+
+    const Atom atom = XInternAtom(display, kUtilityWindowProperty, False);
+    unsigned long marker = 1;
+    XChangeProperty(display, static_cast<Window>(widget->winId()), atom, XA_CARDINAL, 32,
+                    PropModeReplace, reinterpret_cast<unsigned char *>(&marker), 1);
+    XFlush(display);
+    XCloseDisplay(display);
+}
+
+bool sendActivationRequest()
+{
+    QLocalSocket socket;
+    socket.connectToServer(QString::fromLatin1(kInstanceServerName));
+    if (!socket.waitForConnected(700))
+        return false;
+
+    socket.write("show\n");
+    socket.flush();
+    socket.waitForBytesWritten(700);
+    socket.disconnectFromServer();
+    return true;
+}
+
+int acquireInstanceLock()
+{
+    const int fd = ::open("/tmp/transTags_linux.instance.lock", O_RDWR | O_CREAT, 0600);
+    if (fd == -1)
+        return -1;
+
+    struct flock lock = {};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;
+    if (::fcntl(fd, F_SETLK, &lock) == -1) {
+        ::close(fd);
+        return -1;
+    }
+
+    const QByteArray pid = QByteArray::number(::getpid()) + '\n';
+    if (::ftruncate(fd, 0) == -1) {
+        ::close(fd);
+        return -1;
+    }
+    const ssize_t written = ::write(fd, pid.constData(), static_cast<size_t>(pid.size()));
+    (void)written;
+    return fd;
 }
 
 } // namespace
@@ -217,14 +279,13 @@ public slots:
 
     void toggleClickThrough()
     {
-        Window window = lastClickThroughWindow();
-        if (isValidWindow(window)) {
-            setClickThrough(window, false);
-            emit statusChanged(tr("%1：鼠标穿透已解除").arg(windowTitle(window)));
+        if (hasMarkedInputShapes()) {
+            unlockAllClickThrough();
+            emit statusChanged(tr("鼠标穿透已全部解除"));
             return;
         }
 
-        window = actionTargetWindow();
+        Window window = actionTargetWindow();
         if (!isValidWindow(window)) {
             emit statusChanged(tr("没有可切换穿透的窗口"));
             return;
@@ -239,9 +300,17 @@ public slots:
     void unlockAllClickThrough()
     {
         for (int i = static_cast<int>(m_states.size()) - 1; i >= 0; --i) {
-            if (m_states[static_cast<size_t>(i)].clickThrough)
-                setClickThrough(m_states[static_cast<size_t>(i)].window, false);
+            if (!m_states[static_cast<size_t>(i)].clickThrough)
+                continue;
+
+            for (Window shapedWindow : m_states[static_cast<size_t>(i)].shapedWindows)
+                resetInputShape(shapedWindow);
+            m_states[static_cast<size_t>(i)].shapedWindows.clear();
+            m_states[static_cast<size_t>(i)].clickThrough = false;
         }
+
+        resetMarkedInputShapes();
+        m_recentClickThrough.clear();
     }
 
     void togglePin()
@@ -339,6 +408,7 @@ private:
         m_atomUtf8String = XInternAtom(m_display, "UTF8_STRING", False);
         m_atomWmClass = XInternAtom(m_display, "WM_CLASS", False);
         m_atomClickThroughMarker = XInternAtom(m_display, "TRANSTAGS_CLICK_THROUGH", False);
+        m_atomUtilityWindowMarker = XInternAtom(m_display, kUtilityWindowProperty, False);
         m_atomClientListStacking = XInternAtom(m_display, "_NET_CLIENT_LIST_STACKING", False);
         m_atomWmWindowType = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE", False);
         m_atomWmWindowTypeDesktop = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
@@ -473,24 +543,8 @@ private:
 
     bool isOwnWindow(Window window) const
     {
-        Atom actualType = None;
-        int actualFormat = 0;
-        unsigned long nitems = 0;
-        unsigned long bytesAfter = 0;
-        unsigned char *data = nullptr;
-        bool own = false;
-
-        if (XGetWindowProperty(m_display, window, m_atomWmClass, 0, 64, False,
-                               XA_STRING, &actualType, &actualFormat, &nitems, &bytesAfter, &data) == Success &&
-            data) {
-            QByteArray wmClass(reinterpret_cast<char *>(data), static_cast<int>(nitems));
-            own = wmClass.toLower().contains("transtags") || wmClass.toLower().contains("transtagsqt");
-        }
-
-        if (data)
-            XFree(data);
-
-        return own;
+        return hasProperty(window, m_atomUtilityWindowMarker) ||
+               hasPropertyInDescendants(window, m_atomUtilityWindowMarker, 4);
     }
 
     bool isOwnWindowOrAncestor(Window window) const
@@ -530,6 +584,30 @@ private:
             XFree(data);
 
         return result == Success && actualType != None;
+    }
+
+    bool hasPropertyInDescendants(Window window, Atom atom, int maxDepth) const
+    {
+        if (window == None || atom == None || maxDepth <= 0)
+            return false;
+
+        Window root = None;
+        Window parent = None;
+        Window *children = nullptr;
+        unsigned int childCount = 0;
+        if (!XQueryTree(m_display, window, &root, &parent, &children, &childCount))
+            return false;
+
+        bool found = false;
+        for (unsigned int i = 0; i < childCount && !found; ++i) {
+            const Window child = children[i];
+            found = hasProperty(child, atom) || hasPropertyInDescendants(child, atom, maxDepth - 1);
+        }
+
+        if (children)
+            XFree(children);
+
+        return found;
     }
 
     bool hasWindowType(Window window, Atom type) const
@@ -709,13 +787,23 @@ private:
         return XGetWindowAttributes(m_display, window, &attrs) != 0;
     }
 
-    void collectDescendants(Window window, std::vector<Window> &windows, std::set<Window> &seen) const
+    void collectShapeWindow(Window window, std::vector<Window> &windows, std::set<Window> &seen) const
     {
         if (window == None || seen.count(window))
             return;
 
+        XWindowAttributes attrs = {};
+        if (!XGetWindowAttributes(m_display, window, &attrs))
+            return;
+
         seen.insert(window);
-        windows.push_back(window);
+        if (attrs.c_class == InputOutput)
+            windows.push_back(window);
+    }
+
+    void collectDescendants(Window window, std::vector<Window> &windows, std::set<Window> &seen) const
+    {
+        collectShapeWindow(window, windows, seen);
 
         Window root = None;
         Window parent = None;
@@ -735,11 +823,11 @@ private:
     {
         std::vector<Window> windows;
         std::set<Window> seen;
-
-        collectDescendants(window, windows, seen);
-
         Window current = window;
-        for (int depth = 0; depth < 4; ++depth) {
+
+        for (int depth = 0; depth < 8 && current != None && current != m_root; ++depth) {
+            collectDescendants(current, windows, seen);
+
             Window root = None;
             Window parent = None;
             Window *children = nullptr;
@@ -748,10 +836,8 @@ private:
                 break;
             if (children)
                 XFree(children);
-            if (parent == None || parent == m_root || seen.count(parent))
+            if (parent == None || parent == m_root)
                 break;
-
-            collectDescendants(parent, windows, seen);
             current = parent;
         }
 
@@ -786,6 +872,38 @@ private:
         std::set<Window> seen;
         resetMarkedInputShapes(m_root, seen);
         XFlush(m_display);
+    }
+
+    bool hasMarkedInputShapes()
+    {
+        std::set<Window> seen;
+        return hasMarkedInputShapes(m_root, seen);
+    }
+
+    bool hasMarkedInputShapes(Window window, std::set<Window> &seen)
+    {
+        if (window == None || seen.count(window))
+            return false;
+
+        seen.insert(window);
+        if (hasProperty(window, m_atomClickThroughMarker))
+            return true;
+
+        Window root = None;
+        Window parent = None;
+        Window *children = nullptr;
+        unsigned int childCount = 0;
+        if (!XQueryTree(m_display, window, &root, &parent, &children, &childCount))
+            return false;
+
+        bool found = false;
+        for (unsigned int i = 0; i < childCount && !found; ++i)
+            found = hasMarkedInputShapes(children[i], seen);
+
+        if (children)
+            XFree(children);
+
+        return found;
     }
 
     void resetMarkedInputShapes(Window window, std::set<Window> &seen)
@@ -1016,6 +1134,7 @@ private:
     Atom m_atomUtf8String = None;
     Atom m_atomWmClass = None;
     Atom m_atomClickThroughMarker = None;
+    Atom m_atomUtilityWindowMarker = None;
     Atom m_atomClientListStacking = None;
     Atom m_atomWmWindowType = None;
     Atom m_atomWmWindowTypeDesktop = None;
@@ -1046,6 +1165,7 @@ signals:
     void togglePin();
     void centerWindow();
     void newNote();
+    void showSettings();
     void statusChanged(const QString &message);
 
 protected:
@@ -1066,6 +1186,7 @@ protected:
         const KeyCode keyDown = XKeysymToKeycode(display, XK_Down);
         const KeyCode keyNumpad5 = XKeysymToKeycode(display, XK_KP_5);
         const KeyCode keyN = XKeysymToKeycode(display, XK_N);
+        const KeyCode keyT = XKeysymToKeycode(display, XK_T);
 
         grabKey(display, root, keyLeft, Mod1Mask, numLock);
         grabKey(display, root, keyRight, Mod1Mask, numLock);
@@ -1073,9 +1194,10 @@ protected:
         grabKey(display, root, keyDown, Mod1Mask, numLock);
         grabKey(display, root, keyNumpad5, ControlMask, numLock);
         grabKey(display, root, keyN, Mod1Mask, numLock);
+        grabKey(display, root, keyT, Mod1Mask, numLock);
         XFlush(display);
 
-        emit statusChanged(tr("热键已注册：Alt+←/→、Alt+↑、Alt+↓、Ctrl+小键盘5、Alt+N"));
+        emit statusChanged(tr("热键已注册：Alt+←/→、Alt+↑、Alt+↓、Ctrl+小键盘5、Alt+N、Alt+T"));
 
         const int fd = ConnectionNumber(display);
         while (!isInterruptionRequested()) {
@@ -1100,6 +1222,8 @@ protected:
                     emit centerWindow();
                 else if (key == keyN && (state & Mod1Mask) == Mod1Mask)
                     emit newNote();
+                else if (key == keyT && (state & Mod1Mask) == Mod1Mask)
+                    emit showSettings();
             }
 
             fd_set fds;
@@ -1163,6 +1287,7 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_ShowWithoutActivating);
         setFocusPolicy(Qt::NoFocus);
+        markTransTagsUtilityWindow(this);
 
         auto *layout = new QHBoxLayout(this);
         layout->setContentsMargins(16, 10, 16, 10);
@@ -1417,7 +1542,11 @@ public:
             return false;
         }
 
-        return query.numRowsAffected() > 0;
+        bool exists = false;
+        if (!noteExists(noteId, exists))
+            return false;
+
+        return !exists;
     }
 
     bool searchNotes(const QString &queryText, QVector<NoteSummary> &results)
@@ -1459,6 +1588,21 @@ public:
     }
 
 private:
+    bool noteExists(int noteId, bool &exists)
+    {
+        exists = false;
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("SELECT 1 FROM notes WHERE id = ? LIMIT 1"));
+        query.addBindValue(noteId);
+        if (!query.exec()) {
+            m_lastError = query.lastError().text();
+            return false;
+        }
+
+        exists = query.next();
+        return true;
+    }
+
     void setError(const QString &message, QString *errorMessage)
     {
         m_lastError = message;
@@ -1682,16 +1826,18 @@ private:
     bool m_deleted = false;
 };
 
-class NotesManagerDialog final : public QDialog {
+class NotesManagerDialog final : public QWidget {
     Q_OBJECT
 
 public:
     explicit NotesManagerDialog(NoteStore *store, QWidget *parent = nullptr)
-        : QDialog(parent)
+        : QWidget(parent)
         , m_store(store)
     {
         setWindowTitle(tr("transTags 便签管理"));
+        setWindowFlags(Qt::Window);
         setMinimumSize(560, 420);
+        markTransTagsUtilityWindow(this);
 
         auto *root = new QVBoxLayout(this);
 
@@ -1964,11 +2110,12 @@ public:
         setWindowFlags((windowFlags()
                         | Qt::CustomizeWindowHint
                         | Qt::WindowTitleHint
+                        | Qt::WindowMinimizeButtonHint
                         | Qt::WindowCloseButtonHint)
-                       & ~Qt::WindowMinimizeButtonHint
                        & ~Qt::WindowMaximizeButtonHint
                        & ~Qt::WindowContextHelpButtonHint);
         setMinimumWidth(460);
+        markTransTagsUtilityWindow(this);
 
         auto *root = new QVBoxLayout(this);
 
@@ -1993,6 +2140,8 @@ public:
         hotkeyLayout->addWidget(new QLabel(tr("Ctrl + 小键盘 5"), this), 3, 0);
         hotkeyLayout->addWidget(new QLabel(tr("窗口居中"), this), 3, 1);
         hotkeyLayout->addWidget(new QLabel(tr("Alt + N"), this), 4, 0);
+        hotkeyLayout->addWidget(new QLabel(tr("Alt + T"), this), 5, 0);
+        hotkeyLayout->addWidget(new QLabel(tr("显示设置窗口"), this), 5, 1);
         hotkeyLayout->addWidget(new QLabel(tr("新建便签"), this), 4, 1);
         root->addWidget(hotkeyBox);
 
@@ -2124,10 +2273,12 @@ int main(int argc, char **argv)
         std::signal(SIGTERM, handleUnixSignal);
     }
 
-    QLockFile lockFile(QStringLiteral("/tmp/transTags_linux.lock"));
-    lockFile.setStaleLockTime(0);
-    if (!lockFile.tryLock(100)) {
-        QMessageBox::information(nullptr, QObject::tr("transTags Linux"), QObject::tr("transTags Linux 已在运行中。"));
+    if (sendActivationRequest())
+        return 0;
+
+    const int instanceLockFd = acquireInstanceLock();
+    if (instanceLockFd == -1) {
+        sendActivationRequest();
         return 0;
     }
 
@@ -2149,6 +2300,37 @@ int main(int argc, char **argv)
     noteController.setNotesEnabled(dialog.notesEnabled() && notesAvailable);
     if (!notesAvailable)
         dialog.setStatus(notesError);
+
+    auto showSettings = [&dialog]() {
+        dialog.setWindowState(dialog.windowState() & ~Qt::WindowMinimized);
+        dialog.show();
+        dialog.raise();
+        dialog.activateWindow();
+        QApplication::alert(&dialog, 3000);
+    };
+
+    QLocalServer instanceServer;
+    QLocalServer::removeServer(QString::fromLatin1(kInstanceServerName));
+    instanceServer.setSocketOptions(QLocalServer::UserAccessOption);
+    if (instanceServer.listen(QString::fromLatin1(kInstanceServerName))) {
+        std::fprintf(stderr, "transTags instance server listening: %s\n", kInstanceServerName);
+        QObject::connect(&instanceServer, &QLocalServer::newConnection, [&instanceServer, &showSettings]() {
+            while (instanceServer.hasPendingConnections()) {
+                QLocalSocket *socket = instanceServer.nextPendingConnection();
+                QObject::connect(socket, &QLocalSocket::readyRead, socket, [socket, &showSettings]() {
+                    const QByteArray request = socket->readAll();
+                    if (request.contains("show"))
+                        showSettings();
+                    socket->disconnectFromServer();
+                });
+                QObject::connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
+            }
+        });
+    } else {
+        std::fprintf(stderr, "transTags instance server error: %s\n",
+                     instanceServer.errorString().toUtf8().constData());
+        dialog.setStatus(QObject::tr("单实例唤醒服务启动失败：%1").arg(instanceServer.errorString()));
+    }
 
     QObject::connect(&dialog, &SettingsDialog::transparencyStepChanged, &controller, &WindowController::setTransparencyStep);
     QObject::connect(&dialog, &SettingsDialog::clickThroughChanged, &controller, &WindowController::setClickThroughEnabled);
@@ -2172,6 +2354,7 @@ int main(int argc, char **argv)
     QObject::connect(&hotkeys, &HotkeyThread::togglePin, &controller, &WindowController::togglePin);
     QObject::connect(&hotkeys, &HotkeyThread::centerWindow, &controller, &WindowController::centerWindow);
     QObject::connect(&hotkeys, &HotkeyThread::newNote, &noteController, &NoteController::createNewNote);
+    QObject::connect(&hotkeys, &HotkeyThread::showSettings, &app, showSettings);
     QObject::connect(&hotkeys, &HotkeyThread::statusChanged, &dialog, &SettingsDialog::setStatus);
     QObject::connect(&hotkeys, &HotkeyThread::statusChanged, &toast, &ToastPopup::showMessage);
 
@@ -2192,47 +2375,40 @@ int main(int argc, char **argv)
     trayMenu.addSeparator();
     QAction *quitAction = trayMenu.addAction(QObject::tr("退出"));
 
-    QObject::connect(settingsAction, &QAction::triggered, [&dialog]() {
-        dialog.show();
-        dialog.raise();
-        dialog.activateWindow();
-    });
+    QObject::connect(settingsAction, &QAction::triggered, &app, showSettings);
     QObject::connect(unlockAction, &QAction::triggered, &controller, &WindowController::toggleClickThrough);
     QObject::connect(unpinAction, &QAction::triggered, &controller, &WindowController::unlockAllPinned);
     QObject::connect(newNoteAction, &QAction::triggered, &noteController, &NoteController::createNewNote);
     QObject::connect(manageNotesAction, &QAction::triggered, &noteController, &NoteController::showManager);
     QObject::connect(quitAction, &QAction::triggered, &app, &QCoreApplication::quit);
-    QObject::connect(&tray, &QSystemTrayIcon::activated, [&dialog](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger) {
-            dialog.show();
-            dialog.raise();
-            dialog.activateWindow();
-        }
+    QObject::connect(&tray, &QSystemTrayIcon::activated, &app, [&showSettings](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger)
+            showSettings();
     });
 
     tray.setContextMenu(&trayMenu);
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray.show();
         tray.showMessage(QObject::tr("transTags Linux"),
-                         QObject::tr("已启动。Alt+←/→ 调透明，Alt+↑ 切换穿透，Alt+↓ 置顶，Alt+N 新建便签。"),
+                         QObject::tr("已启动。Alt+←/→ 调透明，Alt+↑ 切换穿透，Alt+↓ 置顶，Alt+N 新建便签，Alt+T 显示设置。"),
                          QSystemTrayIcon::Information, 3500);
         toast.showMessage(QObject::tr("transTags Linux 已启动"));
     } else {
-        dialog.show();
+        showSettings();
     }
 
+    QTimer::singleShot(600, &app, showSettings);
+
     if (sessionType() != QStringLiteral("x11")) {
-        QTimer::singleShot(600, [&dialog]() {
-            dialog.show();
-            dialog.raise();
-            dialog.activateWindow();
-        });
+        QTimer::singleShot(900, &app, showSettings);
     }
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit, [&]() {
         hotkeys.requestInterruption();
         hotkeys.wait(1000);
         controller.cleanup();
+        if (instanceLockFd != -1)
+            ::close(instanceLockFd);
     });
 
     return QApplication::exec();
