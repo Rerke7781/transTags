@@ -72,8 +72,8 @@ transTags_linux/release/transTags_linux.zip
 1. 打开 GitHub 仓库页面。
 2. 点击右侧或顶部的 `Releases`。
 3. 点击 `Draft a new release`。
-4. Tag 填 `v0.1.0`。
-5. Title 填 `transTags v0.1.0`。
+4. Tag 填当前版本号，例如 `v0.1.2`。
+5. Title 填对应标题，例如 `transTags v0.1.2`。
 6. 把上面的 exe/zip 文件拖进去。
 7. 点击 `Publish release`。
 
@@ -81,11 +81,11 @@ transTags_linux/release/transTags_linux.zip
 
 ```powershell
 cd "C:\Users\Sim\Desktop\嵌入式课程设计\transTags"
-gh release create v0.1.0 `
+gh release create v0.1.2 `
   transTags_windows/release/transTags_windows.exe `
   transTags_windows/release/transTags_windows.zip `
   transTags_linux/release/transTags_linux.zip `
-  --title "transTags v0.1.0" `
+  --title "transTags v0.1.2" `
   --notes "Initial open-source release."
 ```
 
