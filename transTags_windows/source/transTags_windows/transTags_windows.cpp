@@ -4,7 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <cwctype>
+#include <string>
+#include <vector>
 #include "resource.h"
+#include "sqlite/sqlite3.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -16,17 +20,25 @@
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_SETTINGS 1002
 #define ID_TRAY_UNLOCK_CLICK_THROUGH 1003
+#define ID_TRAY_NEW_NOTE 1004
+#define ID_TRAY_NOTES_MANAGER 1005
 #define ID_HOTKEY_TRANSPARENCY_UP 1
 #define ID_HOTKEY_TRANSPARENCY_DOWN 2
 #define ID_HOTKEY_CENTER_WINDOW 3
 #define ID_HOTKEY_PIN_WINDOW 4
 #define ID_HOTKEY_UNLOCK_CLICK_THROUGH 5
+#define ID_HOTKEY_NEW_NOTE 6
 #define CONFIG_FILE L".\\config.ini"
+#define NOTES_DB_FILE L".\\transTags_notes.sqlite"
 #define MAX_PATH_LEN 260
 #define MAX_CLICK_THROUGH_WINDOWS 64
 #define MAX_PINNED_WINDOWS 64
+#define MAX_NOTE_TITLE_LEN 160
+#define MAX_NOTE_CONTENT_LEN 8192
 #define TOAST_TIMER_ID 9001
 #define TOAST_DURATION_MS 1800
+#define NOTE_AUTOSAVE_TIMER_ID 9101
+#define NOTE_AUTOSAVE_DELAY_MS 900
 #define APP_VERSION L"v0.2.0"
 
 // 控件ID
@@ -47,11 +59,23 @@
 #define IDC_CLICK_THROUGH_ENABLE 2015
 #define IDC_UNLOCK_CLICK_THROUGH_DISPLAY 2016
 #define IDC_UNLOCK_CLICK_THROUGH_BUTTON 2017
+#define IDC_NOTE_TITLE_EDIT 3001
+#define IDC_NOTE_CONTENT_EDIT 3002
+#define IDC_NOTE_SAVE_BUTTON 3003
+#define IDC_NOTE_PIN_BUTTON 3004
+#define IDC_NOTE_DELETE_BUTTON 3005
+#define IDC_NOTES_SEARCH_EDIT 3101
+#define IDC_NOTES_LISTBOX 3102
+#define IDC_NOTES_NEW_BUTTON 3103
+#define IDC_NOTES_OPEN_BUTTON 3104
+#define IDC_NOTES_DELETE_BUTTON 3105
+#define IDC_NOTES_REFRESH_BUTTON 3106
 
 // 全局变量
 HWND g_hMainWnd = NULL;           // 主窗口句柄
 HWND g_hSettingsWnd = NULL;       // 设置窗口句柄
 HWND g_hToastWnd = NULL;          // 右下角提示窗口句柄
+HWND g_hNotesManagerWnd = NULL;   // 便签管理窗口句柄
 NOTIFYICONDATA g_nid = { 0 };     // 系统托盘图标数据
 int g_transparencyStep = 10;      // 透明度调整步长（默认10%）
 wchar_t g_toastText[256] = L"";   // 右下角提示文本
@@ -84,6 +108,11 @@ UINT g_pinModifiers = MOD_ALT;               // 窗口置顶修饰键
 UINT g_pinKey = VK_DOWN;                     // 窗口置顶按键
 BOOL g_enablePin = TRUE;                     // 是否启用窗口置顶功能
 
+// 便签快捷键设置
+UINT g_newNoteModifiers = MOD_ALT;           // 新建便签修饰键
+UINT g_newNoteKey = 'N';                     // 新建便签按键
+BOOL g_enableNotes = TRUE;                   // 是否启用便签功能
+
 // 热键监听状态
 BOOL g_isListeningHotkey = FALSE;     // 是否正在监听热键输入
 int g_currentListeningType = 0;       // 当前监听类型: 0=无, 1=透明度增加, 2=透明度减少, 3=居中, 4=置顶, 5=切换穿透
@@ -91,14 +120,76 @@ HWND g_hCurrentButton = NULL;         // 当前正在设置的按钮句柄
 HWND g_hCurrentDisplay = NULL;        // 当前正在设置的显示框句柄
 DWORD g_listeningStartTime = 0;       // 监听开始时间（用于超时检测）
 
+struct NoteRecord {
+    int id = 0;
+    std::wstring title;
+    std::wstring content;
+    int colorIndex = 0;
+    BOOL pinned = FALSE;
+    int x = CW_USEDEFAULT;
+    int y = CW_USEDEFAULT;
+    int width = 360;
+    int height = 320;
+    std::wstring createdAt;
+    std::wstring updatedAt;
+};
+
+struct NoteSummary {
+    int id = 0;
+    std::wstring title;
+    std::wstring preview;
+    std::wstring updatedAt;
+};
+
+struct NoteWindowData {
+    int id = 0;
+    int colorIndex = 0;
+    BOOL pinned = FALSE;
+    BOOL dirty = FALSE;
+    HWND hTitleEdit = NULL;
+    HWND hContentEdit = NULL;
+    HWND hSaveButton = NULL;
+    HWND hPinButton = NULL;
+    HWND hDeleteButton = NULL;
+    HFONT hTitleFont = NULL;
+    HFONT hContentFont = NULL;
+    HBRUSH hBrush = NULL;
+};
+
+struct NotesManagerData {
+    HWND hSearchEdit = NULL;
+    HWND hListBox = NULL;
+    HWND hNewButton = NULL;
+    HWND hOpenButton = NULL;
+    HWND hDeleteButton = NULL;
+    HWND hRefreshButton = NULL;
+    HFONT hFont = NULL;
+    std::vector<NoteSummary> results;
+};
+
 // 函数声明
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);         // 主窗口消息处理函数
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);       // 设置窗口消息处理函数
 LRESULT CALLBACK ToastProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);          // 右下角提示窗口消息处理函数
+LRESULT CALLBACK NoteProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);           // 便签窗口消息处理函数
+LRESULT CALLBACK NotesManagerProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);   // 便签管理窗口消息处理函数
 void CreateTrayIcon(HWND hwnd);                   // 创建系统托盘图标
 void RemoveTrayIcon();                            // 移除系统托盘图标
 void ShowContextMenu(HWND hwnd);                  // 显示右键菜单
 void ShowSettingsWindow();                        // 显示设置窗口
+void ShowNotesManagerWindow();                    // 显示便签管理窗口
+void CreateNewNote();                             // 新建便签
+void OpenNoteWindow(int noteId);                  // 打开便签窗口
+void RefreshNotesManagerList(HWND hwnd);          // 刷新便签列表
+void OpenSelectedNoteFromManager(HWND hwnd);       // 从管理窗口打开选中便签
+void DeleteSelectedNoteFromManager(HWND hwnd);     // 从管理窗口删除选中便签
+BOOL InitNotesDatabase();                         // 初始化便签数据库
+BOOL LoadNoteRecord(int noteId, NoteRecord& note); // 加载便签
+int InsertBlankNote();                            // 插入空白便签
+BOOL SaveNoteFromWindow(HWND hwnd, BOOL showMessage); // 保存便签窗口内容
+BOOL DeleteNoteById(int noteId);                  // 删除便签
+BOOL SearchNotes(const wchar_t* query, std::vector<NoteSummary>& results); // 查询便签
+BOOL IsOwnUtilityWindow(HWND hwnd);               // 是否为本程序工具窗口
 void ShowToast(const wchar_t* text);               // 显示右下角提示
 void DestroyToastWindow();                         // 销毁右下角提示窗口
 void RegisterHotKeys(HWND hwnd);                  // 注册全局热键
@@ -157,6 +248,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 加载配置
     LoadConfig();
+    if (!InitNotesDatabase()) {
+        MessageBox(NULL, L"便签数据库初始化失败，便签功能将不可用。", L"警告", MB_OK | MB_ICONWARNING);
+        g_enableNotes = FALSE;
+    }
 
     // 创建隐藏的主窗口
     g_hMainWnd = CreateWindow(
@@ -181,7 +276,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 显示启动提示
     wchar_t startupMsg[500];
-    swprintf_s(startupMsg, 500, L"transTags %s 已启动！\n\n默认热键：\n- Alt+←/→ 调整窗口透明度\n- Alt+↑ 切换鼠标穿透\n- Ctrl+数字键5 窗口居中（需开启）\n- Alt+↓ 锁定/取消窗口置顶\n\n透明后鼠标穿透默认开启，右键点击托盘图标进行设置", APP_VERSION);
+    swprintf_s(startupMsg, 500, L"transTags %s 已启动！\n\n默认热键：\n- Alt+←/→ 调整窗口透明度\n- Alt+↑ 切换鼠标穿透\n- Ctrl+数字键5 窗口居中（需开启）\n- Alt+↓ 锁定/取消窗口置顶\n- Alt+N 新建便签\n\n透明后鼠标穿透默认开启，右键点击托盘图标进行设置和管理便签", APP_VERSION);
     MessageBox(NULL, startupMsg, L"transTags 启动成功", MB_OK | MB_ICONINFORMATION);
 
     // 消息循环
@@ -225,6 +320,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         case ID_HOTKEY_UNLOCK_CLICK_THROUGH:
             ToggleClickThroughWindow(); // 切换鼠标穿透
             break;
+        case ID_HOTKEY_NEW_NOTE:
+            CreateNewNote(); // 新建便签
+            break;
         }
         break;
 
@@ -241,6 +339,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             break;
         case ID_TRAY_UNLOCK_CLICK_THROUGH:
             ToggleClickThroughWindow();
+            break;
+        case ID_TRAY_NEW_NOTE:
+            CreateNewNote();
+            break;
+        case ID_TRAY_NOTES_MANAGER:
+            ShowNotesManagerWindow();
             break;
         case ID_TRAY_EXIT:
             PostQuitMessage(0);
@@ -948,6 +1052,9 @@ void RemoveTrayIcon()
 void ShowContextMenu(HWND hwnd)
 {
     HMENU hMenu = CreatePopupMenu();
+    AppendMenu(hMenu, MF_STRING, ID_TRAY_NEW_NOTE, L"新建便签");
+    AppendMenu(hMenu, MF_STRING, ID_TRAY_NOTES_MANAGER, L"管理便签");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"设置");
     AppendMenu(hMenu, MF_STRING, ID_TRAY_UNLOCK_CLICK_THROUGH, L"切换鼠标穿透");
     AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -1038,6 +1145,11 @@ void RegisterHotKeys(HWND hwnd)
             MessageBox(hwnd, L"切换鼠标穿透热键注册失败，可能与其他程序冲突", L"警告", MB_OK | MB_ICONWARNING);
         }
     }
+    if (g_enableNotes) {
+        if (!RegisterHotKey(hwnd, ID_HOTKEY_NEW_NOTE, g_newNoteModifiers, g_newNoteKey)) {
+            MessageBox(hwnd, L"新建便签热键注册失败，可能与其他程序冲突", L"警告", MB_OK | MB_ICONWARNING);
+        }
+    }
 }
 
 // 注销全局热键
@@ -1048,6 +1160,7 @@ void UnregisterHotKeys(HWND hwnd)
     UnregisterHotKey(hwnd, ID_HOTKEY_CENTER_WINDOW);
     UnregisterHotKey(hwnd, ID_HOTKEY_PIN_WINDOW);
     UnregisterHotKey(hwnd, ID_HOTKEY_UNLOCK_CLICK_THROUGH);
+    UnregisterHotKey(hwnd, ID_HOTKEY_NEW_NOTE);
 }
 
 // 调整窗口透明度
@@ -1129,7 +1242,7 @@ int GetWindowTransparency(HWND hwnd)
 // 检查目标窗口是否可操作
 BOOL IsValidTargetWindow(HWND hwnd)
 {
-    return hwnd && IsWindow(hwnd) && hwnd != g_hMainWnd && hwnd != g_hSettingsWnd;
+    return hwnd && IsWindow(hwnd) && hwnd != g_hMainWnd && hwnd != g_hSettingsWnd && !IsOwnUtilityWindow(hwnd);
 }
 
 // 设置窗口鼠标穿透
@@ -1376,6 +1489,840 @@ void UnlockAllPinnedWindows()
     }
 }
 
+static COLORREF GetNoteColor(int colorIndex)
+{
+    (void)colorIndex;
+    return RGB(248, 248, 248);
+}
+
+static std::string WideToUtf8(const std::wstring& value)
+{
+    if (value.empty()) {
+        return std::string();
+    }
+    int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, NULL, 0, NULL, NULL);
+    if (size <= 0) {
+        return std::string();
+    }
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &result[0], size, NULL, NULL);
+    result.resize(size - 1);
+    return result;
+}
+
+static std::wstring Utf8ToWide(const char* value)
+{
+    if (!value || value[0] == '\0') {
+        return std::wstring();
+    }
+    int size = MultiByteToWideChar(CP_UTF8, 0, value, -1, NULL, 0);
+    if (size <= 0) {
+        return std::wstring();
+    }
+    std::wstring result(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value, -1, &result[0], size);
+    result.resize(size - 1);
+    return result;
+}
+
+static std::wstring GetWindowTextString(HWND hwnd)
+{
+    int length = GetWindowTextLength(hwnd);
+    if (length <= 0) {
+        return std::wstring();
+    }
+    std::vector<wchar_t> buffer(length + 1);
+    GetWindowText(hwnd, buffer.data(), length + 1);
+    return std::wstring(buffer.data());
+}
+
+static std::wstring TrimTitle(const std::wstring& value)
+{
+    size_t begin = 0;
+    while (begin < value.length() && iswspace(value[begin])) begin++;
+    size_t end = value.length();
+    while (end > begin && iswspace(value[end - 1])) end--;
+    return value.substr(begin, end - begin);
+}
+
+static std::wstring BuildPreview(const std::wstring& content)
+{
+    std::wstring preview;
+    BOOL lastWasSpace = TRUE;
+    for (wchar_t ch : content) {
+        BOOL isSpace = iswspace(ch);
+        if (isSpace) {
+            if (!lastWasSpace) {
+                preview.push_back(L' ');
+            }
+            lastWasSpace = TRUE;
+        }
+        else {
+            preview.push_back(ch);
+            lastWasSpace = FALSE;
+        }
+        if (preview.length() >= 80) {
+            break;
+        }
+    }
+    return TrimTitle(preview);
+}
+
+static std::wstring EscapeSqlLikePattern(const std::wstring& value)
+{
+    std::wstring escaped;
+    escaped.reserve(value.length());
+    for (wchar_t ch : value) {
+        if (ch == L'\\' || ch == L'%' || ch == L'_') {
+            escaped.push_back(L'\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+static std::wstring GetDisplayTitle(const NoteSummary& note)
+{
+    std::wstring title = TrimTitle(note.title);
+    if (!title.empty()) {
+        return title;
+    }
+    std::wstring preview = TrimTitle(note.preview);
+    if (!preview.empty()) {
+        if (preview.length() > 20) {
+            preview = preview.substr(0, 20);
+        }
+        return preview;
+    }
+    return L"无标题便签";
+}
+
+static std::wstring GetDisplayTitle(const NoteRecord& note)
+{
+    std::wstring title = TrimTitle(note.title);
+    if (!title.empty()) {
+        return title;
+    }
+    std::wstring preview = BuildPreview(note.content);
+    if (!preview.empty()) {
+        if (preview.length() > 20) {
+            preview = preview.substr(0, 20);
+        }
+        return preview;
+    }
+    return L"无标题便签";
+}
+
+static BOOL OpenNotesDb(sqlite3** db)
+{
+    *db = NULL;
+    if (sqlite3_open16(NOTES_DB_FILE, db) != SQLITE_OK) {
+        if (*db) {
+            sqlite3_close(*db);
+            *db = NULL;
+        }
+        return FALSE;
+    }
+    sqlite3_busy_timeout(*db, 3000);
+    return TRUE;
+}
+
+BOOL InitNotesDatabase()
+{
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        return FALSE;
+    }
+
+    const char* sql =
+        "CREATE TABLE IF NOT EXISTS notes ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "title TEXT NOT NULL DEFAULT '',"
+        "content TEXT NOT NULL DEFAULT '',"
+        "color_index INTEGER NOT NULL DEFAULT 0,"
+        "pinned INTEGER NOT NULL DEFAULT 0,"
+        "x INTEGER,"
+        "y INTEGER,"
+        "width INTEGER NOT NULL DEFAULT 360,"
+        "height INTEGER NOT NULL DEFAULT 320,"
+        "created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),"
+        "updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes(updated_at DESC);";
+
+    char* error = NULL;
+    BOOL ok = (sqlite3_exec(db, sql, NULL, NULL, &error) == SQLITE_OK);
+    if (error) {
+        sqlite3_free(error);
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
+int InsertBlankNote()
+{
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        return 0;
+    }
+
+    const char* sql =
+        "INSERT INTO notes(title, content, color_index, pinned, width, height) "
+        "VALUES('', '', 0, 0, 360, 320);";
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    int id = 0;
+    if (rc == SQLITE_OK) {
+        id = (int)sqlite3_last_insert_rowid(db);
+    }
+    sqlite3_close(db);
+    return id;
+}
+
+BOOL LoadNoteRecord(int noteId, NoteRecord& note)
+{
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        return FALSE;
+    }
+
+    const char* sql =
+        "SELECT id, title, content, color_index, pinned, "
+        "COALESCE(x, -32000), COALESCE(y, -32000), width, height, created_at, updated_at "
+        "FROM notes WHERE id = ?1;";
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return FALSE;
+    }
+
+    sqlite3_bind_int(stmt, 1, noteId);
+    BOOL found = FALSE;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        note.id = sqlite3_column_int(stmt, 0);
+        note.title = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+        note.content = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
+        note.colorIndex = sqlite3_column_int(stmt, 3);
+        note.pinned = sqlite3_column_int(stmt, 4) ? TRUE : FALSE;
+        note.x = sqlite3_column_int(stmt, 5);
+        note.y = sqlite3_column_int(stmt, 6);
+        note.width = sqlite3_column_int(stmt, 7);
+        note.height = sqlite3_column_int(stmt, 8);
+        note.createdAt = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9)));
+        note.updatedAt = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10)));
+        if (note.width < 260) note.width = 260;
+        if (note.height < 220) note.height = 220;
+        found = TRUE;
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return found;
+}
+
+BOOL DeleteNoteById(int noteId)
+{
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        return FALSE;
+    }
+
+    sqlite3_stmt* stmt = NULL;
+    const char* sql = "DELETE FROM notes WHERE id = ?1;";
+    BOOL ok = FALSE;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, noteId);
+        ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return ok;
+}
+
+BOOL SearchNotes(const wchar_t* query, std::vector<NoteSummary>& results)
+{
+    results.clear();
+
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        return FALSE;
+    }
+
+    const char* sql =
+        "SELECT id, title, content, updated_at FROM notes "
+        "WHERE (?1 = '' OR title LIKE ?2 ESCAPE '\\' OR content LIKE ?2 ESCAPE '\\') "
+        "ORDER BY updated_at DESC LIMIT 200;";
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return FALSE;
+    }
+
+    std::wstring q = query ? TrimTitle(query) : L"";
+    std::wstring like = L"%" + EscapeSqlLikePattern(q) + L"%";
+    std::string q8 = WideToUtf8(q);
+    std::string like8 = WideToUtf8(like);
+    sqlite3_bind_text(stmt, 1, q8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, like8.c_str(), -1, SQLITE_TRANSIENT);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        NoteSummary summary;
+        summary.id = sqlite3_column_int(stmt, 0);
+        summary.title = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+        std::wstring content = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)));
+        summary.preview = BuildPreview(content);
+        summary.updatedAt = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)));
+        results.push_back(summary);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return TRUE;
+}
+
+static void RefreshNoteBrush(NoteWindowData* data)
+{
+    if (!data) {
+        return;
+    }
+    if (data->hBrush) {
+        DeleteObject(data->hBrush);
+    }
+    data->hBrush = CreateSolidBrush(GetNoteColor(data->colorIndex));
+}
+
+BOOL SaveNoteFromWindow(HWND hwnd, BOOL showMessage)
+{
+    NoteWindowData* data = (NoteWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (!data || data->id <= 0) {
+        return FALSE;
+    }
+
+    std::wstring title = GetWindowTextString(data->hTitleEdit);
+    std::wstring content = GetWindowTextString(data->hContentEdit);
+    RECT rect;
+    GetWindowRect(hwnd, &rect);
+
+    sqlite3* db = NULL;
+    if (!OpenNotesDb(&db)) {
+        ShowToast(L"便签数据库不可用");
+        return FALSE;
+    }
+
+    const char* sql =
+        "UPDATE notes SET title = ?1, content = ?2, color_index = ?3, pinned = ?4, "
+        "x = ?5, y = ?6, width = ?7, height = ?8, updated_at = datetime('now','localtime') "
+        "WHERE id = ?9;";
+    sqlite3_stmt* stmt = NULL;
+    BOOL ok = FALSE;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        std::string title8 = WideToUtf8(title);
+        std::string content8 = WideToUtf8(content);
+        sqlite3_bind_text(stmt, 1, title8.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, content8.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, data->colorIndex);
+        sqlite3_bind_int(stmt, 4, data->pinned ? 1 : 0);
+        sqlite3_bind_int(stmt, 5, rect.left);
+        sqlite3_bind_int(stmt, 6, rect.top);
+        sqlite3_bind_int(stmt, 7, rect.right - rect.left);
+        sqlite3_bind_int(stmt, 8, rect.bottom - rect.top);
+        sqlite3_bind_int(stmt, 9, data->id);
+        ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    if (ok) {
+        data->dirty = FALSE;
+        NoteRecord displayNote;
+        displayNote.title = title;
+        displayNote.content = content;
+        std::wstring windowTitle = L"便签 - " + GetDisplayTitle(displayNote);
+        SetWindowText(hwnd, windowTitle.c_str());
+        if (showMessage) {
+            ShowToast(L"便签已保存");
+        }
+        if (g_hNotesManagerWnd) {
+            RefreshNotesManagerList(g_hNotesManagerWnd);
+        }
+    }
+    else if (showMessage) {
+        ShowToast(L"便签保存失败");
+    }
+    return ok;
+}
+
+void CreateNewNote()
+{
+    if (!g_enableNotes) {
+        ShowToast(L"便签功能未启用");
+        return;
+    }
+    int noteId = InsertBlankNote();
+    if (noteId <= 0) {
+        ShowToast(L"新建便签失败");
+        return;
+    }
+    OpenNoteWindow(noteId);
+    if (g_hNotesManagerWnd) {
+        RefreshNotesManagerList(g_hNotesManagerWnd);
+    }
+}
+
+struct FindNoteWindowContext {
+    int noteId;
+    HWND hwnd;
+};
+
+static BOOL CALLBACK FindNoteWindowProc(HWND hwnd, LPARAM lParam)
+{
+    FindNoteWindowContext* context = (FindNoteWindowContext*)lParam;
+    wchar_t className[128] = L"";
+    GetClassName(hwnd, className, 128);
+    if (wcscmp(className, L"transTagsNoteClass") != 0) {
+        return TRUE;
+    }
+
+    NoteWindowData* data = (NoteWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (data && data->id == context->noteId) {
+        context->hwnd = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND FindOpenNoteWindow(int noteId)
+{
+    FindNoteWindowContext context = { noteId, NULL };
+    EnumWindows(FindNoteWindowProc, (LPARAM)&context);
+    return context.hwnd;
+}
+
+void OpenNoteWindow(int noteId)
+{
+    HWND existing = FindOpenNoteWindow(noteId);
+    if (existing) {
+        ShowWindow(existing, SW_RESTORE);
+        SetForegroundWindow(existing);
+        return;
+    }
+
+    NoteRecord note;
+    if (!LoadNoteRecord(noteId, note)) {
+        ShowToast(L"找不到该便签");
+        return;
+    }
+
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = NoteProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"transTagsNoteClass";
+    wc.hCursor = LoadCursor(NULL, IDC_IBEAM);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_TRANSTAGS));
+    RegisterClass(&wc);
+
+    RECT workArea;
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &workArea, 0);
+    int width = note.width > 0 ? note.width : 360;
+    int height = note.height > 0 ? note.height : 320;
+    int x = note.x;
+    int y = note.y;
+    if (x == -32000 || y == -32000 || x < workArea.left - width || y < workArea.top - height ||
+        x > workArea.right || y > workArea.bottom) {
+        x = workArea.right - width - 40;
+        y = workArea.top + 80 + ((note.id % 6) * 28);
+    }
+
+    NoteRecord* param = new NoteRecord(note);
+    std::wstring windowTitle = L"便签 - " + GetDisplayTitle(note);
+    HWND hwnd = CreateWindowEx(
+        note.pinned ? WS_EX_TOPMOST | WS_EX_TOOLWINDOW : WS_EX_TOOLWINDOW,
+        L"transTagsNoteClass",
+        windowTitle.c_str(),
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX,
+        x, y, width, height,
+        NULL, NULL, GetModuleHandle(NULL), param);
+
+    if (!hwnd) {
+        delete param;
+        ShowToast(L"打开便签失败");
+        return;
+    }
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+}
+
+LRESULT CALLBACK NoteProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    NoteWindowData* data = (NoteWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    switch (uMsg) {
+    case WM_CREATE:
+    {
+        CREATESTRUCT* create = (CREATESTRUCT*)lParam;
+        NoteRecord* note = (NoteRecord*)create->lpCreateParams;
+        data = new NoteWindowData();
+        data->id = note->id;
+        data->colorIndex = note->colorIndex;
+        data->pinned = note->pinned;
+        data->hTitleFont = CreateFont(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        data->hContentFont = CreateFont(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        RefreshNoteBrush(data);
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+        data->hTitleEdit = CreateWindowEx(0, L"EDIT", note->title.c_str(),
+            WS_VISIBLE | WS_CHILD | ES_AUTOHSCROLL,
+            8, 8, 180, 24, hwnd, (HMENU)IDC_NOTE_TITLE_EDIT, GetModuleHandle(NULL), NULL);
+        data->hContentEdit = CreateWindowEx(0, L"EDIT", note->content.c_str(),
+            WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
+            8, 38, 320, 210, hwnd, (HMENU)IDC_NOTE_CONTENT_EDIT, GetModuleHandle(NULL), NULL);
+        data->hSaveButton = CreateWindow(L"BUTTON", L"保存",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            220, 7, 46, 24, hwnd, (HMENU)IDC_NOTE_SAVE_BUTTON, GetModuleHandle(NULL), NULL);
+        data->hPinButton = CreateWindow(L"BUTTON", data->pinned ? L"取消置顶" : L"置顶",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            272, 7, 64, 24, hwnd, (HMENU)IDC_NOTE_PIN_BUTTON, GetModuleHandle(NULL), NULL);
+        data->hDeleteButton = CreateWindow(L"BUTTON", L"删除",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            342, 7, 46, 24, hwnd, (HMENU)IDC_NOTE_DELETE_BUTTON, GetModuleHandle(NULL), NULL);
+
+        SendMessage(data->hTitleEdit, WM_SETFONT, (WPARAM)data->hTitleFont, TRUE);
+        SendMessage(data->hContentEdit, WM_SETFONT, (WPARAM)data->hContentFont, TRUE);
+        SendMessage(data->hTitleEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(2, 2));
+        SendMessage(data->hContentEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(2, 2));
+        SendMessage(data->hContentEdit, EM_SETLIMITTEXT, 1024 * 1024, 0);
+        delete note;
+        return 0;
+    }
+    case WM_SIZE:
+        if (data) {
+            int width = LOWORD(lParam);
+            int height = HIWORD(lParam);
+            int buttonY = 7;
+            int buttonHeight = 24;
+            int deleteWidth = 46;
+            int pinWidth = 64;
+            int saveWidth = 46;
+            int gap = 6;
+            int right = width - 8;
+            int deleteX = right - deleteWidth;
+            int pinX = deleteX - gap - pinWidth;
+            int saveX = pinX - gap - saveWidth;
+            int titleWidth = saveX - 16;
+            int contentHeight = height - 46;
+            if (contentHeight < 80) contentHeight = 80;
+            if (titleWidth < 80) titleWidth = 80;
+            MoveWindow(data->hTitleEdit, 8, 8, titleWidth, 24, TRUE);
+            MoveWindow(data->hSaveButton, saveX, buttonY, saveWidth, buttonHeight, TRUE);
+            MoveWindow(data->hPinButton, pinX, buttonY, pinWidth, buttonHeight, TRUE);
+            MoveWindow(data->hDeleteButton, deleteX, buttonY, deleteWidth, buttonHeight, TRUE);
+            MoveWindow(data->hContentEdit, 8, 38, width - 16, contentHeight, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (!data) break;
+        if ((HWND)lParam == data->hTitleEdit || (HWND)lParam == data->hContentEdit) {
+            if (HIWORD(wParam) == EN_CHANGE) {
+                data->dirty = TRUE;
+                KillTimer(hwnd, NOTE_AUTOSAVE_TIMER_ID);
+                SetTimer(hwnd, NOTE_AUTOSAVE_TIMER_ID, NOTE_AUTOSAVE_DELAY_MS, NULL);
+            }
+            break;
+        }
+
+        switch (LOWORD(wParam)) {
+        case IDC_NOTE_SAVE_BUTTON:
+            SaveNoteFromWindow(hwnd, TRUE);
+            break;
+        case IDC_NOTE_PIN_BUTTON:
+            data->pinned = !data->pinned;
+            SetWindowPos(hwnd, data->pinned ? HWND_TOPMOST : HWND_NOTOPMOST,
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowText(data->hPinButton, data->pinned ? L"取消置顶" : L"置顶");
+            data->dirty = TRUE;
+            SaveNoteFromWindow(hwnd, FALSE);
+            ShowToast(data->pinned ? L"便签已置顶" : L"便签已取消置顶");
+            break;
+        case IDC_NOTE_DELETE_BUTTON:
+            if (MessageBox(hwnd, L"确定删除这条便签？", L"删除便签", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                int id = data->id;
+                if (DeleteNoteById(id)) {
+                    ShowToast(L"便签已删除");
+                    if (g_hNotesManagerWnd) RefreshNotesManagerList(g_hNotesManagerWnd);
+                    DestroyWindow(hwnd);
+                }
+                else {
+                    ShowToast(L"删除便签失败");
+                }
+            }
+            break;
+        }
+        return 0;
+    case WM_TIMER:
+        if (wParam == NOTE_AUTOSAVE_TIMER_ID && data && data->dirty) {
+            KillTimer(hwnd, NOTE_AUTOSAVE_TIMER_ID);
+            SaveNoteFromWindow(hwnd, FALSE);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+        if (data && data->hBrush) {
+            HDC hdc = (HDC)wParam;
+            SetBkColor(hdc, GetNoteColor(data->colorIndex));
+            SetTextColor(hdc, RGB(30, 30, 30));
+            return (LRESULT)data->hBrush;
+        }
+        break;
+    case WM_CLOSE:
+        if (data && data->dirty) {
+            SaveNoteFromWindow(hwnd, FALSE);
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_NCDESTROY:
+        if (data) {
+            if (data->hTitleFont) DeleteObject(data->hTitleFont);
+            if (data->hContentFont) DeleteObject(data->hContentFont);
+            if (data->hBrush) DeleteObject(data->hBrush);
+            delete data;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+void ShowNotesManagerWindow()
+{
+    if (!g_enableNotes) {
+        ShowToast(L"便签功能未启用");
+        return;
+    }
+    if (g_hNotesManagerWnd) {
+        SetForegroundWindow(g_hNotesManagerWnd);
+        return;
+    }
+
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = NotesManagerProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"transTagsNotesManagerClass";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_TRANSTAGS));
+    RegisterClass(&wc);
+
+    RECT workArea;
+    SystemParametersInfo(SPI_GETWORKAREA, 0, &workArea, 0);
+    int width = 560;
+    int height = 420;
+    int x = (workArea.left + workArea.right - width) / 2;
+    int y = (workArea.top + workArea.bottom - height) / 2;
+
+    g_hNotesManagerWnd = CreateWindow(
+        L"transTagsNotesManagerClass",
+        L"transTags 便签管理",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME,
+        x, y, width, height,
+        NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    if (g_hNotesManagerWnd) {
+        ShowWindow(g_hNotesManagerWnd, SW_SHOW);
+        UpdateWindow(g_hNotesManagerWnd);
+    }
+}
+
+void RefreshNotesManagerList(HWND hwnd)
+{
+    NotesManagerData* data = (NotesManagerData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (!data) {
+        return;
+    }
+
+    std::wstring query = GetWindowTextString(data->hSearchEdit);
+    if (!SearchNotes(query.c_str(), data->results)) {
+        ShowToast(L"查询便签失败");
+        return;
+    }
+
+    SendMessage(data->hListBox, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < data->results.size(); i++) {
+        const NoteSummary& note = data->results[i];
+        std::wstring title = GetDisplayTitle(note);
+        std::wstring preview = note.preview.empty() ? L"空白便签" : note.preview;
+        std::wstring line = note.updatedAt + L"    " + title + L"    " + preview;
+        int index = (int)SendMessage(data->hListBox, LB_ADDSTRING, 0, (LPARAM)line.c_str());
+        if (index >= 0) {
+            SendMessage(data->hListBox, LB_SETITEMDATA, index, (LPARAM)note.id);
+        }
+    }
+}
+
+void OpenSelectedNoteFromManager(HWND hwnd)
+{
+    NotesManagerData* data = (NotesManagerData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (!data) return;
+    int index = (int)SendMessage(data->hListBox, LB_GETCURSEL, 0, 0);
+    if (index == LB_ERR) {
+        ShowToast(L"请选择一条便签");
+        return;
+    }
+    int noteId = (int)SendMessage(data->hListBox, LB_GETITEMDATA, index, 0);
+    OpenNoteWindow(noteId);
+}
+
+void DeleteSelectedNoteFromManager(HWND hwnd)
+{
+    NotesManagerData* data = (NotesManagerData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (!data) return;
+    int index = (int)SendMessage(data->hListBox, LB_GETCURSEL, 0, 0);
+    if (index == LB_ERR) {
+        ShowToast(L"请选择一条便签");
+        return;
+    }
+    int noteId = (int)SendMessage(data->hListBox, LB_GETITEMDATA, index, 0);
+    if (MessageBox(hwnd, L"确定删除选中的便签？", L"删除便签", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+        return;
+    }
+    HWND openNote = FindOpenNoteWindow(noteId);
+    if (DeleteNoteById(noteId)) {
+        if (openNote) {
+            DestroyWindow(openNote);
+        }
+        ShowToast(L"便签已删除");
+        RefreshNotesManagerList(hwnd);
+    }
+    else {
+        ShowToast(L"删除便签失败");
+    }
+}
+
+LRESULT CALLBACK NotesManagerProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    NotesManagerData* data = (NotesManagerData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    switch (uMsg) {
+    case WM_CREATE:
+    {
+        data = new NotesManagerData();
+        data->hFont = CreateFont(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+
+        CreateWindow(L"STATIC", L"搜索标题或正文:",
+            WS_VISIBLE | WS_CHILD,
+            16, 18, 110, 22,
+            hwnd, NULL, GetModuleHandle(NULL), NULL);
+        data->hSearchEdit = CreateWindowEx(0, L"EDIT", L"",
+            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            128, 16, 300, 24,
+            hwnd, (HMENU)IDC_NOTES_SEARCH_EDIT, GetModuleHandle(NULL), NULL);
+        data->hRefreshButton = CreateWindow(L"BUTTON", L"刷新",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            440, 15, 80, 26,
+            hwnd, (HMENU)IDC_NOTES_REFRESH_BUTTON, GetModuleHandle(NULL), NULL);
+        data->hListBox = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_VISIBLE | WS_CHILD | WS_VSCROLL | LBS_NOTIFY,
+            16, 52, 504, 270,
+            hwnd, (HMENU)IDC_NOTES_LISTBOX, GetModuleHandle(NULL), NULL);
+        data->hNewButton = CreateWindow(L"BUTTON", L"新建",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            16, 336, 82, 30,
+            hwnd, (HMENU)IDC_NOTES_NEW_BUTTON, GetModuleHandle(NULL), NULL);
+        data->hOpenButton = CreateWindow(L"BUTTON", L"打开",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            110, 336, 82, 30,
+            hwnd, (HMENU)IDC_NOTES_OPEN_BUTTON, GetModuleHandle(NULL), NULL);
+        data->hDeleteButton = CreateWindow(L"BUTTON", L"删除",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            204, 336, 82, 30,
+            hwnd, (HMENU)IDC_NOTES_DELETE_BUTTON, GetModuleHandle(NULL), NULL);
+
+        SendMessage(data->hSearchEdit, WM_SETFONT, (WPARAM)data->hFont, TRUE);
+        SendMessage(data->hListBox, WM_SETFONT, (WPARAM)data->hFont, TRUE);
+        RefreshNotesManagerList(hwnd);
+        return 0;
+    }
+    case WM_SIZE:
+        if (data) {
+            int width = LOWORD(lParam);
+            int height = HIWORD(lParam);
+            MoveWindow(data->hSearchEdit, 128, 16, width - 246, 24, TRUE);
+            MoveWindow(data->hRefreshButton, width - 96, 15, 80, 26, TRUE);
+            MoveWindow(data->hListBox, 16, 52, width - 32, height - 116, TRUE);
+            MoveWindow(data->hNewButton, 16, height - 48, 82, 30, TRUE);
+            MoveWindow(data->hOpenButton, 110, height - 48, 82, 30, TRUE);
+            MoveWindow(data->hDeleteButton, 204, height - 48, 82, 30, TRUE);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (!data) break;
+        if ((HWND)lParam == data->hSearchEdit && HIWORD(wParam) == EN_CHANGE) {
+            RefreshNotesManagerList(hwnd);
+            return 0;
+        }
+        if ((HWND)lParam == data->hListBox && HIWORD(wParam) == LBN_DBLCLK) {
+            OpenSelectedNoteFromManager(hwnd);
+            return 0;
+        }
+
+        switch (LOWORD(wParam)) {
+        case IDC_NOTES_NEW_BUTTON:
+            CreateNewNote();
+            break;
+        case IDC_NOTES_OPEN_BUTTON:
+            OpenSelectedNoteFromManager(hwnd);
+            break;
+        case IDC_NOTES_DELETE_BUTTON:
+            DeleteSelectedNoteFromManager(hwnd);
+            break;
+        case IDC_NOTES_REFRESH_BUTTON:
+            RefreshNotesManagerList(hwnd);
+            break;
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_NCDESTROY:
+        if (data) {
+            if (data->hFont) DeleteObject(data->hFont);
+            delete data;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+        }
+        g_hNotesManagerWnd = NULL;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+BOOL IsOwnUtilityWindow(HWND hwnd)
+{
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!root) {
+        root = hwnd;
+    }
+    if (root == g_hMainWnd || root == g_hSettingsWnd || root == g_hToastWnd || root == g_hNotesManagerWnd) {
+        return TRUE;
+    }
+
+    wchar_t className[128] = L"";
+    GetClassName(root, className, 128);
+    return wcscmp(className, L"transTagsNotesManagerClass") == 0 ||
+        wcscmp(className, L"SettingsWindowClass") == 0 ||
+        wcscmp(className, L"transTagsToastClass") == 0;
+}
+
 // 加载配置
 void LoadConfig()
 {
@@ -1392,6 +2339,8 @@ void LoadConfig()
     g_centerKey = GetPrivateProfileInt(L"Hotkeys", L"CenterKey", VK_NUMPAD5, CONFIG_FILE);
     g_pinModifiers = GetPrivateProfileInt(L"Hotkeys", L"PinModifiers", MOD_ALT, CONFIG_FILE);
     g_pinKey = GetPrivateProfileInt(L"Hotkeys", L"PinKey", VK_DOWN, CONFIG_FILE);
+    g_newNoteModifiers = GetPrivateProfileInt(L"Hotkeys", L"NewNoteModifiers", MOD_ALT, CONFIG_FILE);
+    g_newNoteKey = GetPrivateProfileInt(L"Hotkeys", L"NewNoteKey", 'N', CONFIG_FILE);
 
     // 加载热键开关状态
     g_enableTransparencyUp = GetPrivateProfileInt(L"Switches", L"EnableTransparencyUp", 1, CONFIG_FILE);
@@ -1399,6 +2348,7 @@ void LoadConfig()
     g_enableClickThroughLock = GetPrivateProfileInt(L"Switches", L"EnableClickThroughLock", 1, CONFIG_FILE);
     g_enableCenter = GetPrivateProfileInt(L"Switches", L"EnableCenter", 0, CONFIG_FILE);
     g_enablePin = GetPrivateProfileInt(L"Switches", L"EnablePin", 1, CONFIG_FILE);
+    g_enableNotes = GetPrivateProfileInt(L"Switches", L"EnableNotes", 1, CONFIG_FILE);
 
     // 限制透明度步长范围
     if (g_transparencyStep < 1) g_transparencyStep = 1;
@@ -1435,6 +2385,10 @@ void SaveConfig()
     WritePrivateProfileString(L"Hotkeys", L"PinModifiers", value, CONFIG_FILE);
     swprintf(value, 32, L"%d", g_pinKey);
     WritePrivateProfileString(L"Hotkeys", L"PinKey", value, CONFIG_FILE);
+    swprintf(value, 32, L"%d", g_newNoteModifiers);
+    WritePrivateProfileString(L"Hotkeys", L"NewNoteModifiers", value, CONFIG_FILE);
+    swprintf(value, 32, L"%d", g_newNoteKey);
+    WritePrivateProfileString(L"Hotkeys", L"NewNoteKey", value, CONFIG_FILE);
 
     // 保存热键开关状态
     swprintf(value, 32, L"%d", g_enableTransparencyUp ? 1 : 0);
@@ -1447,6 +2401,8 @@ void SaveConfig()
     WritePrivateProfileString(L"Switches", L"EnableCenter", value, CONFIG_FILE);
     swprintf(value, 32, L"%d", g_enablePin ? 1 : 0);
     WritePrivateProfileString(L"Switches", L"EnablePin", value, CONFIG_FILE);
+    swprintf(value, 32, L"%d", g_enableNotes ? 1 : 0);
+    WritePrivateProfileString(L"Switches", L"EnableNotes", value, CONFIG_FILE);
 }
 
 // 获取修饰键名称

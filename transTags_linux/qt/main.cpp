@@ -6,26 +6,38 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDialog>
+#include <QDir>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QLockFile>
+#include <QMap>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMoveEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPointer>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QSettings>
 #include <QSlider>
 #include <QScreen>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QSocketNotifier>
 #include <QSystemTrayIcon>
+#include <QTextEdit>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QVector>
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -41,6 +53,7 @@
 #include <cstdio>
 #include <cstring>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include <sys/socket.h>
@@ -869,6 +882,7 @@ signals:
     void toggleClickThrough();
     void togglePin();
     void centerWindow();
+    void newNote();
     void statusChanged(const QString &message);
 
 protected:
@@ -888,15 +902,17 @@ protected:
         const KeyCode keyUp = XKeysymToKeycode(display, XK_Up);
         const KeyCode keyDown = XKeysymToKeycode(display, XK_Down);
         const KeyCode keyNumpad5 = XKeysymToKeycode(display, XK_KP_5);
+        const KeyCode keyN = XKeysymToKeycode(display, XK_N);
 
         grabKey(display, root, keyLeft, Mod1Mask, numLock);
         grabKey(display, root, keyRight, Mod1Mask, numLock);
         grabKey(display, root, keyUp, Mod1Mask, numLock);
         grabKey(display, root, keyDown, Mod1Mask, numLock);
         grabKey(display, root, keyNumpad5, ControlMask, numLock);
+        grabKey(display, root, keyN, Mod1Mask, numLock);
         XFlush(display);
 
-        emit statusChanged(tr("热键已注册：Alt+←/→、Alt+↑、Alt+↓、Ctrl+小键盘5"));
+        emit statusChanged(tr("热键已注册：Alt+←/→、Alt+↑、Alt+↓、Ctrl+小键盘5、Alt+N"));
 
         const int fd = ConnectionNumber(display);
         while (!isInterruptionRequested()) {
@@ -919,6 +935,8 @@ protected:
                     emit togglePin();
                 else if (key == keyNumpad5 && (state & ControlMask) == ControlMask)
                     emit centerWindow();
+                else if (key == keyN && (state & Mod1Mask) == Mod1Mask)
+                    emit newNote();
             }
 
             fd_set fds;
@@ -1035,6 +1053,743 @@ private:
     QTimer m_timer;
 };
 
+struct NoteRecord {
+    int id = 0;
+    QString title;
+    QString content;
+    int colorIndex = 0;
+    bool pinned = false;
+    int x = -1;
+    int y = -1;
+    int width = 360;
+    int height = 320;
+    QString createdAt;
+    QString updatedAt;
+};
+
+struct NoteSummary {
+    int id = 0;
+    QString title;
+    QString preview;
+    QString updatedAt;
+};
+
+static QString compactText(QString text, int maxLength)
+{
+    text.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    text.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    text = text.simplified();
+    if (text.size() > maxLength)
+        text = text.left(maxLength - 1) + QStringLiteral("…");
+    return text;
+}
+
+static QString displayNoteTitle(const QString &title, const QString &content)
+{
+    QString value = title.trimmed();
+    if (value.isEmpty())
+        value = compactText(content, 28);
+    if (value.isEmpty())
+        value = QObject::tr("无标题便签");
+    return compactText(value, 42);
+}
+
+static QColor noteColor(int colorIndex)
+{
+    static const std::array<QColor, 5> colors = {
+        QColor(255, 248, 181),
+        QColor(220, 245, 255),
+        QColor(226, 255, 220),
+        QColor(255, 229, 235),
+        QColor(240, 233, 255),
+    };
+    const int index = std::clamp(colorIndex, 0, static_cast<int>(colors.size()) - 1);
+    return colors[static_cast<size_t>(index)];
+}
+
+class NoteStore final : public QObject {
+    Q_OBJECT
+
+public:
+    explicit NoteStore(QObject *parent = nullptr)
+        : QObject(parent)
+        , m_connectionName(QStringLiteral("transTags_notes_%1").arg(QString::number(reinterpret_cast<quintptr>(this), 16)))
+    {
+    }
+
+    ~NoteStore() override
+    {
+        if (m_db.isValid()) {
+            m_db.close();
+            m_db = QSqlDatabase();
+            QSqlDatabase::removeDatabase(m_connectionName);
+        }
+    }
+
+    bool initialize(QString *errorMessage = nullptr)
+    {
+        if (m_available)
+            return true;
+
+        m_db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
+        m_dbPath = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("transTags_notes.sqlite"));
+        m_db.setDatabaseName(m_dbPath);
+
+        if (!m_db.open()) {
+            setError(tr("便签数据库打开失败：%1").arg(m_db.lastError().text()), errorMessage);
+            return false;
+        }
+
+        QSqlQuery pragma(m_db);
+        pragma.exec(QStringLiteral("PRAGMA busy_timeout = 3000"));
+
+        QSqlQuery query(m_db);
+        const QString sql = QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS notes ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "title TEXT NOT NULL DEFAULT '',"
+            "content TEXT NOT NULL DEFAULT '',"
+            "color_index INTEGER NOT NULL DEFAULT 0,"
+            "pinned INTEGER NOT NULL DEFAULT 0,"
+            "x INTEGER NOT NULL DEFAULT -1,"
+            "y INTEGER NOT NULL DEFAULT -1,"
+            "width INTEGER NOT NULL DEFAULT 360,"
+            "height INTEGER NOT NULL DEFAULT 320,"
+            "created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),"
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))"
+            ")");
+        if (!query.exec(sql)) {
+            setError(tr("便签表初始化失败：%1").arg(query.lastError().text()), errorMessage);
+            return false;
+        }
+
+        m_available = true;
+        m_lastError.clear();
+        return true;
+    }
+
+    bool available() const { return m_available; }
+    QString databasePath() const { return m_dbPath; }
+    QString lastError() const { return m_lastError; }
+
+    int insertBlankNote()
+    {
+        if (!m_available)
+            return 0;
+
+        QSqlQuery query(m_db);
+        if (!query.exec(QStringLiteral(
+                "INSERT INTO notes (title, content, color_index, pinned, x, y, width, height) "
+                "VALUES ('', '', 0, 0, -1, -1, 360, 320)"))) {
+            m_lastError = query.lastError().text();
+            return 0;
+        }
+
+        return query.lastInsertId().toInt();
+    }
+
+    bool loadNote(int noteId, NoteRecord &note)
+    {
+        if (!m_available)
+            return false;
+
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral(
+            "SELECT id, title, content, color_index, pinned, x, y, width, height, created_at, updated_at "
+            "FROM notes WHERE id = ?"));
+        query.addBindValue(noteId);
+
+        if (!query.exec()) {
+            m_lastError = query.lastError().text();
+            return false;
+        }
+
+        if (!query.next())
+            return false;
+
+        note.id = query.value(0).toInt();
+        note.title = query.value(1).toString();
+        note.content = query.value(2).toString();
+        note.colorIndex = query.value(3).toInt();
+        note.pinned = query.value(4).toInt() != 0;
+        note.x = query.value(5).toInt();
+        note.y = query.value(6).toInt();
+        note.width = query.value(7).toInt();
+        note.height = query.value(8).toInt();
+        note.createdAt = query.value(9).toString();
+        note.updatedAt = query.value(10).toString();
+        return true;
+    }
+
+    bool saveNote(const NoteRecord &note)
+    {
+        if (!m_available)
+            return false;
+
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral(
+            "UPDATE notes SET title = ?, content = ?, color_index = ?, pinned = ?, "
+            "x = ?, y = ?, width = ?, height = ?, updated_at = datetime('now', 'localtime') "
+            "WHERE id = ?"));
+        query.addBindValue(note.title.left(160));
+        query.addBindValue(note.content.left(8192));
+        query.addBindValue(note.colorIndex);
+        query.addBindValue(note.pinned ? 1 : 0);
+        query.addBindValue(note.x);
+        query.addBindValue(note.y);
+        query.addBindValue(note.width);
+        query.addBindValue(note.height);
+        query.addBindValue(note.id);
+
+        if (!query.exec()) {
+            m_lastError = query.lastError().text();
+            return false;
+        }
+
+        return query.numRowsAffected() > 0;
+    }
+
+    bool deleteNote(int noteId)
+    {
+        if (!m_available)
+            return false;
+
+        QSqlQuery query(m_db);
+        query.prepare(QStringLiteral("DELETE FROM notes WHERE id = ?"));
+        query.addBindValue(noteId);
+        if (!query.exec()) {
+            m_lastError = query.lastError().text();
+            return false;
+        }
+
+        return query.numRowsAffected() > 0;
+    }
+
+    bool searchNotes(const QString &queryText, QVector<NoteSummary> &results)
+    {
+        results.clear();
+        if (!m_available)
+            return false;
+
+        QSqlQuery query(m_db);
+        if (queryText.trimmed().isEmpty()) {
+            query.prepare(QStringLiteral(
+                "SELECT id, title, content, updated_at FROM notes "
+                "ORDER BY datetime(updated_at) DESC, id DESC LIMIT 200"));
+        } else {
+            query.prepare(QStringLiteral(
+                "SELECT id, title, content, updated_at FROM notes "
+                "WHERE title LIKE ? OR content LIKE ? "
+                "ORDER BY datetime(updated_at) DESC, id DESC LIMIT 200"));
+            const QString like = QStringLiteral("%") + queryText.trimmed() + QStringLiteral("%");
+            query.addBindValue(like);
+            query.addBindValue(like);
+        }
+
+        if (!query.exec()) {
+            m_lastError = query.lastError().text();
+            return false;
+        }
+
+        while (query.next()) {
+            NoteSummary summary;
+            summary.id = query.value(0).toInt();
+            summary.title = query.value(1).toString();
+            summary.preview = compactText(query.value(2).toString(), 80);
+            summary.updatedAt = query.value(3).toString();
+            results.push_back(summary);
+        }
+
+        return true;
+    }
+
+private:
+    void setError(const QString &message, QString *errorMessage)
+    {
+        m_lastError = message;
+        if (errorMessage)
+            *errorMessage = message;
+    }
+
+    QString m_connectionName;
+    QSqlDatabase m_db;
+    QString m_dbPath;
+    bool m_available = false;
+    QString m_lastError;
+};
+
+class NoteWindow final : public QWidget {
+    Q_OBJECT
+
+public:
+    NoteWindow(NoteStore *store, const NoteRecord &note, QWidget *parent = nullptr)
+        : QWidget(parent)
+        , m_store(store)
+        , m_note(note)
+    {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setWindowFlags(Qt::Window | (m_note.pinned ? Qt::WindowStaysOnTopHint : Qt::WindowFlags()));
+        setMinimumSize(300, 220);
+
+        const QColor background = noteColor(m_note.colorIndex);
+        setAutoFillBackground(true);
+        QPalette pal = palette();
+        pal.setColor(QPalette::Window, background);
+        setPalette(pal);
+
+        auto *root = new QVBoxLayout(this);
+        root->setContentsMargins(10, 10, 10, 10);
+        root->setSpacing(8);
+
+        auto *topRow = new QHBoxLayout();
+        m_titleEdit = new QLineEdit(this);
+        m_titleEdit->setPlaceholderText(tr("便签标题"));
+        m_titleEdit->setMaxLength(160);
+        m_titleEdit->setText(m_note.title);
+        topRow->addWidget(m_titleEdit, 1);
+
+        m_saveButton = new QPushButton(tr("保存"), this);
+        m_pinButton = new QPushButton(this);
+        m_deleteButton = new QPushButton(tr("删除"), this);
+        topRow->addWidget(m_saveButton);
+        topRow->addWidget(m_pinButton);
+        topRow->addWidget(m_deleteButton);
+        root->addLayout(topRow);
+
+        m_contentEdit = new QTextEdit(this);
+        m_contentEdit->setAcceptRichText(false);
+        m_contentEdit->setPlaceholderText(tr("写点内容..."));
+        m_contentEdit->setPlainText(m_note.content);
+        root->addWidget(m_contentEdit, 1);
+
+        const QString editorStyle = QStringLiteral(
+            "QLineEdit, QTextEdit { background: rgba(255,255,255,180); border: 1px solid rgba(0,0,0,45); "
+            "border-radius: 4px; padding: 4px; color: #1f2933; }"
+            "QPushButton { padding: 4px 8px; }");
+        setStyleSheet(editorStyle);
+
+        m_autosaveTimer.setSingleShot(true);
+        m_autosaveTimer.setInterval(900);
+        connect(&m_autosaveTimer, &QTimer::timeout, this, [this]() {
+            if (m_dirty)
+                saveNote(false);
+        });
+        connect(m_titleEdit, &QLineEdit::textChanged, this, &NoteWindow::scheduleSave);
+        connect(m_contentEdit, &QTextEdit::textChanged, this, &NoteWindow::scheduleSave);
+        connect(m_saveButton, &QPushButton::clicked, this, [this]() { saveNote(true); });
+        connect(m_pinButton, &QPushButton::clicked, this, &NoteWindow::togglePinned);
+        connect(m_deleteButton, &QPushButton::clicked, this, &NoteWindow::deleteSelf);
+
+        updatePinButton();
+        updateWindowTitle();
+        if (m_note.width > 0 && m_note.height > 0)
+            resize(m_note.width, m_note.height);
+        if (m_note.x >= 0 && m_note.y >= 0)
+            move(m_note.x, m_note.y);
+
+        m_ready = true;
+    }
+
+    int noteId() const { return m_note.id; }
+
+public slots:
+    void closeAfterExternalDelete()
+    {
+        m_deleted = true;
+        close();
+    }
+
+signals:
+    void statusChanged(const QString &message);
+    void noteChanged();
+    void noteDeleted(int noteId);
+
+protected:
+    void closeEvent(QCloseEvent *event) override
+    {
+        if (!m_deleted)
+            saveNote(false);
+        QWidget::closeEvent(event);
+    }
+
+    void moveEvent(QMoveEvent *event) override
+    {
+        QWidget::moveEvent(event);
+        scheduleSave();
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        scheduleSave();
+    }
+
+private slots:
+    void scheduleSave()
+    {
+        if (!m_ready || m_deleted)
+            return;
+        m_dirty = true;
+        m_autosaveTimer.start();
+    }
+
+    void togglePinned()
+    {
+        m_note.pinned = !m_note.pinned;
+        const bool visible = isVisible();
+        Qt::WindowFlags flags = windowFlags();
+        if (m_note.pinned)
+            flags |= Qt::WindowStaysOnTopHint;
+        else
+            flags &= ~Qt::WindowStaysOnTopHint;
+        setWindowFlags(flags);
+        updatePinButton();
+        if (visible) {
+            show();
+            raise();
+            activateWindow();
+        }
+        saveNote(false);
+        emit statusChanged(m_note.pinned ? tr("便签已置顶") : tr("便签已取消置顶"));
+    }
+
+    void deleteSelf()
+    {
+        if (QMessageBox::question(this, tr("删除便签"), tr("确定删除这条便签？")) != QMessageBox::Yes)
+            return;
+
+        if (!m_store || !m_store->deleteNote(m_note.id)) {
+            emit statusChanged(tr("删除便签失败"));
+            return;
+        }
+
+        m_deleted = true;
+        emit noteDeleted(m_note.id);
+        close();
+    }
+
+private:
+    bool saveNote(bool showMessage)
+    {
+        if (!m_store || !m_store->available() || m_deleted)
+            return false;
+
+        m_note.title = m_titleEdit->text().left(160);
+        m_note.content = m_contentEdit->toPlainText().left(8192);
+        m_note.colorIndex = std::clamp(m_note.colorIndex, 0, 4);
+        m_note.pinned = windowFlags().testFlag(Qt::WindowStaysOnTopHint);
+        const QRect rect = geometry();
+        m_note.x = rect.x();
+        m_note.y = rect.y();
+        m_note.width = rect.width();
+        m_note.height = rect.height();
+
+        if (!m_store->saveNote(m_note)) {
+            emit statusChanged(tr("便签保存失败"));
+            return false;
+        }
+
+        m_dirty = false;
+        updateWindowTitle();
+        emit noteChanged();
+        if (showMessage)
+            emit statusChanged(tr("便签已保存"));
+        return true;
+    }
+
+    void updateWindowTitle()
+    {
+        setWindowTitle(tr("便签 - %1").arg(displayNoteTitle(m_note.title, m_note.content)));
+    }
+
+    void updatePinButton()
+    {
+        m_pinButton->setText(m_note.pinned ? tr("取消置顶") : tr("置顶"));
+    }
+
+    NoteStore *m_store = nullptr;
+    NoteRecord m_note;
+    QLineEdit *m_titleEdit = nullptr;
+    QTextEdit *m_contentEdit = nullptr;
+    QPushButton *m_saveButton = nullptr;
+    QPushButton *m_pinButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
+    QTimer m_autosaveTimer;
+    bool m_dirty = false;
+    bool m_ready = false;
+    bool m_deleted = false;
+};
+
+class NotesManagerDialog final : public QDialog {
+    Q_OBJECT
+
+public:
+    explicit NotesManagerDialog(NoteStore *store, QWidget *parent = nullptr)
+        : QDialog(parent)
+        , m_store(store)
+    {
+        setWindowTitle(tr("transTags 便签管理"));
+        setMinimumSize(560, 420);
+
+        auto *root = new QVBoxLayout(this);
+
+        auto *searchRow = new QHBoxLayout();
+        searchRow->addWidget(new QLabel(tr("搜索标题或正文:"), this));
+        m_searchEdit = new QLineEdit(this);
+        searchRow->addWidget(m_searchEdit, 1);
+        m_refreshButton = new QPushButton(tr("刷新"), this);
+        searchRow->addWidget(m_refreshButton);
+        root->addLayout(searchRow);
+
+        m_list = new QListWidget(this);
+        m_list->setAlternatingRowColors(true);
+        root->addWidget(m_list, 1);
+
+        auto *buttonRow = new QHBoxLayout();
+        m_newButton = new QPushButton(tr("新建"), this);
+        m_openButton = new QPushButton(tr("打开"), this);
+        m_deleteButton = new QPushButton(tr("删除"), this);
+        buttonRow->addWidget(m_newButton);
+        buttonRow->addWidget(m_openButton);
+        buttonRow->addWidget(m_deleteButton);
+        buttonRow->addStretch(1);
+        root->addLayout(buttonRow);
+
+        connect(m_searchEdit, &QLineEdit::textChanged, this, &NotesManagerDialog::refresh);
+        connect(m_refreshButton, &QPushButton::clicked, this, &NotesManagerDialog::refresh);
+        connect(m_newButton, &QPushButton::clicked, this, &NotesManagerDialog::newNoteRequested);
+        connect(m_openButton, &QPushButton::clicked, this, &NotesManagerDialog::openSelected);
+        connect(m_deleteButton, &QPushButton::clicked, this, &NotesManagerDialog::deleteSelected);
+        connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) {
+            openSelected();
+        });
+
+        refresh();
+    }
+
+public slots:
+    void refresh()
+    {
+        m_list->clear();
+
+        QVector<NoteSummary> results;
+        if (!m_store || !m_store->searchNotes(m_searchEdit->text(), results)) {
+            emit statusChanged(tr("查询便签失败"));
+            return;
+        }
+
+        for (const NoteSummary &summary : results) {
+            const QString title = displayNoteTitle(summary.title, summary.preview);
+            const QString preview = summary.preview.isEmpty() ? tr("空白便签") : summary.preview;
+            auto *item = new QListWidgetItem(QStringLiteral("%1    %2    %3").arg(summary.updatedAt, title, preview), m_list);
+            item->setData(Qt::UserRole, summary.id);
+        }
+    }
+
+signals:
+    void newNoteRequested();
+    void openNoteRequested(int noteId);
+    void deleteNoteRequested(int noteId);
+    void statusChanged(const QString &message);
+
+protected:
+    void closeEvent(QCloseEvent *event) override
+    {
+        hide();
+        event->ignore();
+    }
+
+private slots:
+    void openSelected()
+    {
+        const int id = selectedNoteId();
+        if (id <= 0) {
+            emit statusChanged(tr("请选择一条便签"));
+            return;
+        }
+        emit openNoteRequested(id);
+    }
+
+    void deleteSelected()
+    {
+        const int id = selectedNoteId();
+        if (id <= 0) {
+            emit statusChanged(tr("请选择一条便签"));
+            return;
+        }
+        if (QMessageBox::question(this, tr("删除便签"), tr("确定删除选中的便签？")) != QMessageBox::Yes)
+            return;
+        emit deleteNoteRequested(id);
+    }
+
+private:
+    int selectedNoteId() const
+    {
+        QListWidgetItem *item = m_list->currentItem();
+        return item ? item->data(Qt::UserRole).toInt() : 0;
+    }
+
+    NoteStore *m_store = nullptr;
+    QLineEdit *m_searchEdit = nullptr;
+    QListWidget *m_list = nullptr;
+    QPushButton *m_refreshButton = nullptr;
+    QPushButton *m_newButton = nullptr;
+    QPushButton *m_openButton = nullptr;
+    QPushButton *m_deleteButton = nullptr;
+};
+
+class NoteController final : public QObject {
+    Q_OBJECT
+
+public:
+    explicit NoteController(NoteStore &store, QObject *parent = nullptr)
+        : QObject(parent)
+        , m_store(store)
+    {
+    }
+
+    ~NoteController() override
+    {
+        for (const QPointer<NoteWindow> &window : std::as_const(m_openNotes)) {
+            if (window)
+                window->close();
+        }
+        if (m_manager)
+            m_manager->deleteLater();
+    }
+
+    void setNotesEnabled(bool enabled)
+    {
+        m_enabled = enabled;
+    }
+
+public slots:
+    void createNewNote()
+    {
+        if (!ensureAvailable())
+            return;
+
+        const int id = m_store.insertBlankNote();
+        if (id <= 0) {
+            emit statusChanged(tr("新建便签失败"));
+            return;
+        }
+
+        openNote(id);
+        refreshManager();
+        emit statusChanged(tr("新建便签"));
+    }
+
+    void showManager()
+    {
+        if (!ensureAvailable())
+            return;
+
+        ensureManager();
+        if (!m_manager)
+            return;
+        m_manager->refresh();
+        m_manager->show();
+        m_manager->raise();
+        m_manager->activateWindow();
+    }
+
+    void openNote(int noteId)
+    {
+        if (!ensureAvailable())
+            return;
+
+        if (m_openNotes.contains(noteId) && !m_openNotes.value(noteId).isNull()) {
+            NoteWindow *window = m_openNotes.value(noteId);
+            window->show();
+            window->raise();
+            window->activateWindow();
+            return;
+        }
+
+        NoteRecord note;
+        if (!m_store.loadNote(noteId, note)) {
+            emit statusChanged(tr("找不到该便签"));
+            return;
+        }
+
+        auto *window = new NoteWindow(&m_store, note);
+        m_openNotes.insert(noteId, window);
+        connect(window, &NoteWindow::statusChanged, this, &NoteController::statusChanged);
+        connect(window, &NoteWindow::noteChanged, this, &NoteController::refreshManager);
+        connect(window, &NoteWindow::noteDeleted, this, [this](int id) {
+            m_openNotes.remove(id);
+            refreshManager();
+            emit statusChanged(tr("便签已删除"));
+        });
+        connect(window, &QObject::destroyed, this, [this, noteId]() {
+            m_openNotes.remove(noteId);
+        });
+        window->show();
+        window->raise();
+        window->activateWindow();
+    }
+
+    void deleteNote(int noteId)
+    {
+        if (!ensureAvailable())
+            return;
+
+        if (!m_store.deleteNote(noteId)) {
+            emit statusChanged(tr("删除便签失败"));
+            return;
+        }
+
+        if (m_openNotes.contains(noteId) && !m_openNotes.value(noteId).isNull())
+            m_openNotes.value(noteId)->closeAfterExternalDelete();
+
+        m_openNotes.remove(noteId);
+        refreshManager();
+        emit statusChanged(tr("便签已删除"));
+    }
+
+    void refreshManager()
+    {
+        if (m_manager)
+            m_manager->refresh();
+    }
+
+signals:
+    void statusChanged(const QString &message);
+
+private:
+    bool ensureAvailable()
+    {
+        if (!m_enabled) {
+            emit statusChanged(tr("便签功能未启用"));
+            return false;
+        }
+        if (!m_store.available()) {
+            emit statusChanged(tr("便签数据库不可用：%1").arg(m_store.lastError()));
+            return false;
+        }
+        return true;
+    }
+
+    void ensureManager()
+    {
+        if (m_manager)
+            return;
+
+        auto *manager = new NotesManagerDialog(&m_store);
+        m_manager = manager;
+        connect(manager, &NotesManagerDialog::newNoteRequested, this, &NoteController::createNewNote);
+        connect(manager, &NotesManagerDialog::openNoteRequested, this, &NoteController::openNote);
+        connect(manager, &NotesManagerDialog::deleteNoteRequested, this, &NoteController::deleteNote);
+        connect(manager, &NotesManagerDialog::statusChanged, this, &NoteController::statusChanged);
+    }
+
+    NoteStore &m_store;
+    bool m_enabled = true;
+    QMap<int, QPointer<NoteWindow>> m_openNotes;
+    QPointer<NotesManagerDialog> m_manager;
+};
+
 class SettingsDialog final : public QDialog {
     Q_OBJECT
 
@@ -1075,6 +1830,8 @@ public:
         hotkeyLayout->addWidget(new QLabel(tr("锁定/取消窗口置顶，优先作用于最近穿透窗口"), this), 2, 1);
         hotkeyLayout->addWidget(new QLabel(tr("Ctrl + 小键盘 5"), this), 3, 0);
         hotkeyLayout->addWidget(new QLabel(tr("窗口居中"), this), 3, 1);
+        hotkeyLayout->addWidget(new QLabel(tr("Alt + N"), this), 4, 0);
+        hotkeyLayout->addWidget(new QLabel(tr("新建便签"), this), 4, 1);
         root->addWidget(hotkeyBox);
 
         auto *settingsBox = new QGroupBox(tr("功能"), this);
@@ -1087,6 +1844,10 @@ public:
         m_pinCheck = new QCheckBox(tr("启用窗口置顶锁定"), this);
         m_pinCheck->setChecked(m_settings.value(QStringLiteral("pin"), true).toBool());
         settingsLayout->addWidget(m_pinCheck);
+
+        m_notesCheck = new QCheckBox(tr("启用本地便签"), this);
+        m_notesCheck->setChecked(m_settings.value(QStringLiteral("notes"), true).toBool());
+        settingsLayout->addWidget(m_notesCheck);
 
         auto *sliderRow = new QHBoxLayout();
         sliderRow->addWidget(new QLabel(tr("透明度步长"), this));
@@ -1106,8 +1867,12 @@ public:
         auto *buttonRow = new QHBoxLayout();
         auto *unlockButton = new QPushButton(tr("切换穿透"), this);
         auto *unpinButton = new QPushButton(tr("取消全部置顶"), this);
+        auto *newNoteButton = new QPushButton(tr("新建便签"), this);
+        auto *manageNotesButton = new QPushButton(tr("管理便签"), this);
         buttonRow->addWidget(unlockButton);
         buttonRow->addWidget(unpinButton);
+        buttonRow->addWidget(newNoteButton);
+        buttonRow->addWidget(manageNotesButton);
         buttonRow->addStretch(1);
         root->addLayout(buttonRow);
 
@@ -1124,8 +1889,14 @@ public:
             m_settings.setValue(QStringLiteral("pin"), enabled);
             emit pinChanged(enabled);
         });
+        connect(m_notesCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+            m_settings.setValue(QStringLiteral("notes"), enabled);
+            emit notesChanged(enabled);
+        });
         connect(unlockButton, &QPushButton::clicked, this, &SettingsDialog::toggleClickThroughRequested);
         connect(unpinButton, &QPushButton::clicked, this, &SettingsDialog::unlockAllPinnedRequested);
+        connect(newNoteButton, &QPushButton::clicked, this, &SettingsDialog::newNoteRequested);
+        connect(manageNotesButton, &QPushButton::clicked, this, &SettingsDialog::manageNotesRequested);
 
         m_stepLabel->setText(tr("%1%").arg(m_stepSlider->value()));
     }
@@ -1133,6 +1904,7 @@ public:
     int transparencyStep() const { return m_stepSlider->value(); }
     bool clickThroughEnabled() const { return m_clickThroughCheck->isChecked(); }
     bool pinEnabled() const { return m_pinCheck->isChecked(); }
+    bool notesEnabled() const { return m_notesCheck->isChecked(); }
 
 public slots:
     void setStatus(const QString &message)
@@ -1144,8 +1916,11 @@ signals:
     void transparencyStepChanged(int value);
     void clickThroughChanged(bool enabled);
     void pinChanged(bool enabled);
+    void notesChanged(bool enabled);
     void toggleClickThroughRequested();
     void unlockAllPinnedRequested();
+    void newNoteRequested();
+    void manageNotesRequested();
 
 protected:
     void closeEvent(QCloseEvent *event) override
@@ -1158,6 +1933,7 @@ private:
     QSettings &m_settings;
     QCheckBox *m_clickThroughCheck = nullptr;
     QCheckBox *m_pinCheck = nullptr;
+    QCheckBox *m_notesCheck = nullptr;
     QSlider *m_stepSlider = nullptr;
     QLabel *m_stepLabel = nullptr;
     QLabel *m_statusLabel = nullptr;
@@ -1194,6 +1970,10 @@ int main(int argc, char **argv)
     }
 
     QSettings settings;
+    NoteStore noteStore;
+    QString notesError;
+    const bool notesAvailable = noteStore.initialize(&notesError);
+
     WindowController controller;
     controller.setTransparencyStep(settings.value(QStringLiteral("transparencyStep"), 10).toInt());
     controller.setClickThroughEnabled(settings.value(QStringLiteral("clickThrough"), true).toBool());
@@ -1203,14 +1983,25 @@ int main(int argc, char **argv)
     dialog.setWindowIcon(QIcon::fromTheme(QStringLiteral("preferences-system-windows"), createFallbackIcon()));
     dialog.setStatus(controller.available() ? QObject::tr("已启动") : controller.errorString());
     ToastPopup toast;
+    NoteController noteController(noteStore);
+    noteController.setNotesEnabled(dialog.notesEnabled() && notesAvailable);
+    if (!notesAvailable)
+        dialog.setStatus(notesError);
 
     QObject::connect(&dialog, &SettingsDialog::transparencyStepChanged, &controller, &WindowController::setTransparencyStep);
     QObject::connect(&dialog, &SettingsDialog::clickThroughChanged, &controller, &WindowController::setClickThroughEnabled);
     QObject::connect(&dialog, &SettingsDialog::pinChanged, &controller, &WindowController::setPinEnabled);
+    QObject::connect(&dialog, &SettingsDialog::notesChanged, &noteController, [notesAvailable, &noteController](bool enabled) {
+        noteController.setNotesEnabled(enabled && notesAvailable);
+    });
     QObject::connect(&dialog, &SettingsDialog::toggleClickThroughRequested, &controller, &WindowController::toggleClickThrough);
     QObject::connect(&dialog, &SettingsDialog::unlockAllPinnedRequested, &controller, &WindowController::unlockAllPinned);
+    QObject::connect(&dialog, &SettingsDialog::newNoteRequested, &noteController, &NoteController::createNewNote);
+    QObject::connect(&dialog, &SettingsDialog::manageNotesRequested, &noteController, &NoteController::showManager);
     QObject::connect(&controller, &WindowController::statusChanged, &dialog, &SettingsDialog::setStatus);
     QObject::connect(&controller, &WindowController::statusChanged, &toast, &ToastPopup::showMessage);
+    QObject::connect(&noteController, &NoteController::statusChanged, &dialog, &SettingsDialog::setStatus);
+    QObject::connect(&noteController, &NoteController::statusChanged, &toast, &ToastPopup::showMessage);
 
     HotkeyThread hotkeys;
     QObject::connect(&hotkeys, &HotkeyThread::transparencyUp, &controller, &WindowController::adjustTransparencyUp);
@@ -1218,6 +2009,7 @@ int main(int argc, char **argv)
     QObject::connect(&hotkeys, &HotkeyThread::toggleClickThrough, &controller, &WindowController::toggleClickThrough);
     QObject::connect(&hotkeys, &HotkeyThread::togglePin, &controller, &WindowController::togglePin);
     QObject::connect(&hotkeys, &HotkeyThread::centerWindow, &controller, &WindowController::centerWindow);
+    QObject::connect(&hotkeys, &HotkeyThread::newNote, &noteController, &NoteController::createNewNote);
     QObject::connect(&hotkeys, &HotkeyThread::statusChanged, &dialog, &SettingsDialog::setStatus);
     QObject::connect(&hotkeys, &HotkeyThread::statusChanged, &toast, &ToastPopup::showMessage);
 
@@ -1233,6 +2025,9 @@ int main(int argc, char **argv)
     QAction *unlockAction = trayMenu.addAction(QObject::tr("切换鼠标穿透"));
     QAction *unpinAction = trayMenu.addAction(QObject::tr("取消全部置顶"));
     trayMenu.addSeparator();
+    QAction *newNoteAction = trayMenu.addAction(QObject::tr("新建便签"));
+    QAction *manageNotesAction = trayMenu.addAction(QObject::tr("管理便签"));
+    trayMenu.addSeparator();
     QAction *quitAction = trayMenu.addAction(QObject::tr("退出"));
 
     QObject::connect(settingsAction, &QAction::triggered, [&dialog]() {
@@ -1242,6 +2037,8 @@ int main(int argc, char **argv)
     });
     QObject::connect(unlockAction, &QAction::triggered, &controller, &WindowController::toggleClickThrough);
     QObject::connect(unpinAction, &QAction::triggered, &controller, &WindowController::unlockAllPinned);
+    QObject::connect(newNoteAction, &QAction::triggered, &noteController, &NoteController::createNewNote);
+    QObject::connect(manageNotesAction, &QAction::triggered, &noteController, &NoteController::showManager);
     QObject::connect(quitAction, &QAction::triggered, &app, &QCoreApplication::quit);
     QObject::connect(&tray, &QSystemTrayIcon::activated, [&dialog](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::DoubleClick || reason == QSystemTrayIcon::Trigger) {
@@ -1255,7 +2052,7 @@ int main(int argc, char **argv)
     if (QSystemTrayIcon::isSystemTrayAvailable()) {
         tray.show();
         tray.showMessage(QObject::tr("transTags Linux"),
-                         QObject::tr("已启动。Alt+←/→ 调透明，Alt+↑ 切换穿透，Alt+↓ 置顶。"),
+                         QObject::tr("已启动。Alt+←/→ 调透明，Alt+↑ 切换穿透，Alt+↓ 置顶，Alt+N 新建便签。"),
                          QSystemTrayIcon::Information, 3500);
         toast.showMessage(QObject::tr("transTags Linux 已启动"));
     } else {

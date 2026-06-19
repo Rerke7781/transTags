@@ -3,11 +3,12 @@
 [ English | [中文](README_CN.md) ]
 
 transTags is a small desktop utility for making a target window transparent, click-through, always-on-top, or centered with global hotkeys.
+It also includes local sticky notes with quick note creation, floating note windows, and a searchable note manager.
 
 The project is split by operating system:
 
 - `transTags_windows`: Windows version, implemented with native Win32 APIs.
-- `transTags_linux`: Ubuntu/Linux version, implemented mainly with C++/Qt Widgets plus X11/XFixes/EWMH.
+- `transTags_linux`: Ubuntu/Linux version, implemented mainly with C++/Qt Widgets, QtSql, and X11/XFixes/EWMH.
 
 ## Demo
 
@@ -30,13 +31,16 @@ Choose the package for your system from the latest release:
 - Lock or unlock a selected window as always-on-top.
 - Center the active window.
 - Show a small bottom-right toast after each operation.
+- Create floating sticky notes and save their title, content, bounds, and pin state.
+- Search notes by title or body text in the note manager.
 
 ## Implementation Principle
 
 transTags does not inject code into other programs. It uses the native window APIs provided by each desktop system:
 
 - On Windows, it registers global hotkeys with Win32, finds the target window, changes layered-window opacity, toggles `WS_EX_TRANSPARENT` for mouse click-through, and uses topmost window flags for pinning.
-- On Ubuntu/Linux, the Qt app provides the tray and settings UI, while X11/XFixes/EWMH are used to change opacity, input shape, active-window state, and always-on-top state.
+- On Ubuntu/Linux, the Qt app provides the tray, settings UI, and note UI, while X11/XFixes/EWMH are used to change opacity, input shape, active-window state, and always-on-top state.
+- Sticky notes are normal transTags-owned windows. Note data is stored in a local `transTags_notes.sqlite` database; Windows links the SQLite amalgamation, and Linux uses QtSql with the SQLite driver.
 
 ## Hotkeys
 
@@ -47,6 +51,15 @@ transTags does not inject code into other programs. It uses the native window AP
 | `Alt + Up` | Toggle click-through. If a click-through window exists, unlock it; otherwise enable click-through on the current target. |
 | `Alt + Down` | Toggle always-on-top. Click-through windows are prioritized. |
 | `Ctrl + Numpad 5` | Center the target window. |
+| `Alt + N` | Create a new sticky note. |
+
+## Sticky Notes
+
+- Right-click the tray icon and choose `新建便签` or `管理便签`.
+- Note windows support save, pin, and delete. Notes are saved automatically before closing.
+- Notes are stored in `transTags_notes.sqlite` using SQLite.
+- On Windows, `NewNoteModifiers`, `NewNoteKey`, and `EnableNotes` in `config.ini` control the quick-note hotkey and note switch.
+- On Ubuntu/Linux, the settings window can enable or disable notes. `Alt + N` is the default quick-note hotkey.
 
 ## Directory Layout
 

@@ -37,6 +37,7 @@ jobs:
 
             - Windows users can run `transTags_windows.exe` directly.
             - Ubuntu/Linux users should build and run the Qt version in an `Ubuntu on Xorg` session.
+            - Sticky notes are available on both Windows and Ubuntu/Linux. Use `Alt+N` or the tray menu to create notes.
             - See `README.md` or `README_CN.md` for usage and implementation notes.
           files: |
             transTags_windows/release/transTags_windows.exe
