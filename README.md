@@ -77,4 +77,4 @@ They are ignored by git by default. Upload them through GitHub Releases instead 
 
 ## License
 
-No license file has been selected yet. Before publishing as open source, add a `LICENSE` file such as MIT, Apache-2.0, GPL, or another license that matches how you want others to use the code.
+This project is released under the MIT License. See `LICENSE` for details.
