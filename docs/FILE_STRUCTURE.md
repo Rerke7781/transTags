@@ -12,6 +12,11 @@ transTags/
 |-- .github/
 |   `-- workflows/
 |       `-- release.yml
+|-- docs/
+|   |-- assets/
+|   |   `-- transTags_demo.png
+|   |-- FILE_STRUCTURE.md
+|   `-- GITHUB_UPLOAD.md
 |-- transTags_windows/
 |   |-- source/
 |   |   |-- transTags_windows.sln
@@ -41,10 +46,9 @@ transTags/
 |   |   |-- .gitkeep
 |   |   `-- transTags_linux.zip
 |   `-- README_LINUX.md
-`-- docs/
-    |-- FILE_STRUCTURE.md
-    `-- GITHUB_UPLOAD.md
 ```
+
+`docs/assets/transTags_demo.png` 是 README 和 Release 页面使用的演示截图。
 
 ## Windows 项目
 

@@ -29,6 +29,10 @@ jobs:
             - Windows package: `transTags_windows.zip`
             - Ubuntu/Linux package: `transTags_linux.zip`
 
+            ## Demo
+
+            ![transTags demo](https://raw.githubusercontent.com/Rerke7781/transTags/${{ github.ref_name }}/docs/assets/transTags_demo.png)
+
             ## Notes
 
             - Windows users can run `transTags_windows.exe` directly.

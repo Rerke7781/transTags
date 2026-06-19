@@ -9,6 +9,10 @@ The project is split by operating system:
 - `transTags_windows`: Windows version, implemented with native Win32 APIs.
 - `transTags_linux`: Ubuntu/Linux version, implemented mainly with C++/Qt Widgets plus X11/XFixes/EWMH.
 
+## Demo
+
+![transTags demo showing a transparent click-through window](docs/assets/transTags_demo.png)
+
 ## Download
 
 Choose the package for your system from the latest release:
