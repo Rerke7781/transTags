@@ -1,0 +1,35 @@
+# Visual Studio / Windows build output
+.vs/
+Debug/
+x64/
+x86/
+Win32/
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tlog
+*.lastbuildstate
+*.vcxproj.user
+
+# CMake / Qt build output
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Local release artifacts: upload these to GitHub Releases instead of committing them
+transTags_windows/release/*
+!transTags_windows/release/.gitkeep
+transTags_linux/release/*
+!transTags_linux/release/.gitkeep
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
