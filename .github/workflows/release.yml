@@ -10,51 +10,31 @@ permissions:
 
 jobs:
   publish:
+    name: Upload release assets
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check release assets
-        run: |
-          test -f transTags_windows/release/transTags_windows.exe
-          test -f transTags_windows/release/transTags_windows.zip
-          test -f transTags_linux/release/transTags_linux.zip
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: transTags ${{ github.ref_name }}
+          make_latest: true
+          body: |
+            ## Downloads
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          title="transTags ${tag}"
-          notes="$(cat <<'EOF'
-## Downloads
+            - Windows executable: `transTags_windows.exe`
+            - Windows package: `transTags_windows.zip`
+            - Ubuntu/Linux package: `transTags_linux.zip`
 
-- Windows executable: `transTags_windows.exe`
-- Windows package: `transTags_windows.zip`
-- Ubuntu/Linux package: `transTags_linux.zip`
+            ## Notes
 
-## Notes
-
-- Windows can run `transTags_windows.exe` directly.
-- Ubuntu/Linux should use the Qt version in an `Ubuntu on Xorg` session.
-- See `README.md` or `README_CN.md` for usage and implementation notes.
-EOF
-)"
-
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" \
-              transTags_windows/release/transTags_windows.exe \
-              transTags_windows/release/transTags_windows.zip \
-              transTags_linux/release/transTags_linux.zip \
-              --clobber
-          else
-            gh release create "$tag" \
-              transTags_windows/release/transTags_windows.exe \
-              transTags_windows/release/transTags_windows.zip \
-              transTags_linux/release/transTags_linux.zip \
-              --title "$title" \
-              --notes "$notes" \
-              --latest
-          fi
+            - Windows users can run `transTags_windows.exe` directly.
+            - Ubuntu/Linux users should build and run the Qt version in an `Ubuntu on Xorg` session.
+            - See `README.md` or `README_CN.md` for usage and implementation notes.
+          files: |
+            transTags_windows/release/transTags_windows.exe
+            transTags_windows/release/transTags_windows.zip
+            transTags_linux/release/transTags_linux.zip
