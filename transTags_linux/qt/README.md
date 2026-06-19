@@ -4,6 +4,15 @@ C++/Qt Widgets version of transTags for Ubuntu.
 
 The settings window and tray menu are built with Qt Widgets. Window control uses X11/XFixes/EWMH, so the full feature set requires an `Ubuntu on Xorg` session.
 
+## Principle
+
+Qt is responsible for the settings dialog, tray menu, and toast popup. The actual window-control layer uses X11:
+
+- `_NET_WM_WINDOW_OPACITY` changes window opacity.
+- XFixes/XShape input regions make a window click-through.
+- `_NET_WM_STATE_ABOVE` toggles always-on-top.
+- X11 root-window key grabs implement the global hotkeys.
+
 ## Build
 
 ```bash

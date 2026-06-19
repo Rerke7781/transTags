@@ -23,7 +23,6 @@ transTags/
 |   `-- release/
 |       |-- .gitkeep
 |       |-- transTags_windows.exe
-|       |-- transTags_windows_pin.exe
 |       |-- config.ini
 |       `-- transTags_windows.zip
 |-- transTags_linux/
@@ -81,6 +80,8 @@ transTags_windows/release/
 - `transTags_windows.vcxproj` 是 Visual Studio C++ 工程文件。
 - `transTags_windows.rc`、`transTags_windows.ico`、`resource.h` 是资源文件。
 
+Windows 版原理：通过 Win32 全局热键接收操作命令，使用窗口句柄修改透明度和扩展样式。鼠标穿透依赖 `WS_EX_TRANSPARENT`，窗口置顶依赖 topmost 窗口状态。
+
 ## Linux 项目
 
 当前主版本：
@@ -108,6 +109,8 @@ transTags_linux/qt/build.sh
 - Linux 窗口控制依赖 X11/XFixes/EWMH，完整功能需要 `Ubuntu on Xorg`。
 - `legacy/x11-c/` 是早期 X11 C 版本，仅保留作参考。
 - `legacy/gnome-extension/` 是早期 GNOME Shell 扩展方案，仅保留作参考。
+
+Linux Qt 版原理：Qt 负责界面，X11 负责全局热键和目标窗口查找，XFixes/XShape 负责鼠标穿透，EWMH 属性负责透明度和窗口置顶。
 
 ## GitHub 说明
 

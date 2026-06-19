@@ -15,6 +15,13 @@ The project is split by operating system:
 - Center the active window.
 - Show a small bottom-right toast after each operation.
 
+## Implementation Principle
+
+transTags does not inject code into other programs. It uses the native window APIs provided by each desktop system:
+
+- On Windows, it registers global hotkeys with Win32, finds the target window, changes layered-window opacity, toggles `WS_EX_TRANSPARENT` for mouse click-through, and uses topmost window flags for pinning.
+- On Ubuntu/Linux, the Qt app provides the tray and settings UI, while X11/XFixes/EWMH are used to change opacity, input shape, active-window state, and always-on-top state.
+
 ## Hotkeys
 
 | Hotkey | Action |
@@ -75,7 +82,7 @@ Local release files are stored under:
 - `transTags_windows/release/`
 - `transTags_linux/release/`
 
-They are ignored by git by default. Upload them through GitHub Releases instead of committing them to the source repository.
+They are ignored by git by default. Upload them through GitHub Releases instead of committing them to the source repository. The Windows release has one executable file, `transTags_windows.exe`; the zip package only bundles that executable with its default config file.
 
 ## License
 

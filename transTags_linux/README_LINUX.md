@@ -4,6 +4,16 @@ Ubuntu/Linux versions of transTags.
 
 The recommended version is `qt/`, implemented with C++/Qt Widgets. The `legacy/` directory keeps older experiments for reference.
 
+## Principle
+
+The recommended Qt version uses Qt Widgets only for the user interface. Real window operations are done through the X11 stack:
+
+- X11/EWMH is used for active-window lookup, opacity, work area, and always-on-top state.
+- XFixes/XShape input regions are used for mouse click-through.
+- Global hotkeys are captured from the X11 root window.
+
+Because Wayland intentionally blocks ordinary applications from controlling arbitrary native windows, full functionality requires an `Ubuntu on Xorg` session.
+
 ## Qt Version (Recommended)
 
 ```bash

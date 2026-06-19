@@ -2,6 +2,10 @@
 
 下面以仓库名 `transTags` 为例。先在 GitHub 网页上创建一个空仓库，仓库名建议填写 `transTags`。
 
+## 项目原理简述
+
+transTags 是一个通过系统窗口 API 控制其他窗口状态的小工具。Windows 版使用 Win32 API 修改窗口透明度、扩展样式和置顶状态；Linux Qt 版使用 Qt 做界面，用 X11/XFixes/EWMH 完成透明度、鼠标穿透、置顶和全局热键控制。
+
 创建仓库时建议：
 
 - 不勾选 `Add a README file`，因为本地已经有 `README.md`。
@@ -57,7 +61,7 @@ git push -u origin main
 
 ```text
 transTags_windows/release/transTags_windows.exe
-transTags_windows/release/transTags_windows_pin.exe
+transTags_windows/release/transTags_windows.zip
 transTags_linux/release/transTags_linux.zip
 ```
 
@@ -77,7 +81,7 @@ transTags_linux/release/transTags_linux.zip
 cd "C:\Users\Sim\Desktop\嵌入式课程设计\transTags"
 gh release create v0.1.0 `
   transTags_windows/release/transTags_windows.exe `
-  transTags_windows/release/transTags_windows_pin.exe `
+  transTags_windows/release/transTags_windows.zip `
   transTags_linux/release/transTags_linux.zip `
   --title "transTags v0.1.0" `
   --notes "Initial open-source release."
