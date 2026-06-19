@@ -7,6 +7,7 @@
 ```text
 transTags/
 |-- README.md
+|-- README_CN.md
 |-- .gitignore
 |-- transTags_windows/
 |   |-- source/
@@ -23,7 +24,8 @@ transTags/
 |       |-- .gitkeep
 |       |-- transTags_windows.exe
 |       |-- transTags_windows_pin.exe
-|       `-- config.ini
+|       |-- config.ini
+|       `-- transTags_windows.zip
 |-- transTags_linux/
 |   |-- qt/
 |   |   |-- main.cpp

@@ -41,6 +41,8 @@ transTags/
 
 See `docs/FILE_STRUCTURE.md` for the full structure.
 
+Chinese documentation: `README_CN.md`.
+
 ## Build: Windows
 
 Open the Visual Studio solution:
