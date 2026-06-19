@@ -339,6 +339,12 @@ private:
         m_atomUtf8String = XInternAtom(m_display, "UTF8_STRING", False);
         m_atomWmClass = XInternAtom(m_display, "WM_CLASS", False);
         m_atomClickThroughMarker = XInternAtom(m_display, "TRANSTAGS_CLICK_THROUGH", False);
+        m_atomClientListStacking = XInternAtom(m_display, "_NET_CLIENT_LIST_STACKING", False);
+        m_atomWmWindowType = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE", False);
+        m_atomWmWindowTypeDesktop = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+        m_atomWmWindowTypeDock = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_DOCK", False);
+        m_atomWmWindowTypeSplash = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_SPLASH", False);
+        m_atomWmWindowTypeNotification = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_NOTIFICATION", False);
     }
 
     bool isValidWindow(Window window) const
@@ -350,7 +356,10 @@ private:
         if (!XGetWindowAttributes(m_display, window, &attrs))
             return false;
 
-        return attrs.c_class == InputOutput && attrs.map_state != IsUnmapped && !isOwnWindowOrAncestor(window);
+        return attrs.c_class == InputOutput &&
+               attrs.map_state != IsUnmapped &&
+               !isOwnWindowOrAncestor(window) &&
+               !isDesktopOrShellWindow(window);
     }
 
     Window actionTargetWindow()
@@ -406,18 +415,24 @@ private:
         int winY = 0;
         unsigned int mask = 0;
 
-        if (!XQueryPointer(m_display, m_root, &root, &child, &rootX, &rootY, &winX, &winY, &mask) || child == None)
+        if (!XQueryPointer(m_display, m_root, &root, &child, &rootX, &rootY, &winX, &winY, &mask))
             return None;
 
-        Window current = child;
-        for (int depth = 0; depth < 32; ++depth) {
-            Window next = None;
-            if (!XQueryPointer(m_display, current, &root, &next, &rootX, &rootY, &winX, &winY, &mask) || next == None)
-                break;
-            current = next;
+        if (child != None) {
+            Window current = child;
+            for (int depth = 0; depth < 32; ++depth) {
+                Window next = None;
+                if (!XQueryPointer(m_display, current, &root, &next, &rootX, &rootY, &winX, &winY, &mask) || next == None)
+                    break;
+                current = next;
+            }
+
+            const Window pointerWindow = clientWindowFor(current);
+            if (isValidWindow(pointerWindow))
+                return pointerWindow;
         }
 
-        return clientWindowFor(current);
+        return stackedWindowAt(rootX, rootY);
     }
 
     Window lastClickThroughWindow()
@@ -515,6 +530,148 @@ private:
             XFree(data);
 
         return result == Success && actualType != None;
+    }
+
+    bool hasWindowType(Window window, Atom type) const
+    {
+        if (window == None || type == None)
+            return false;
+
+        Atom actualType = None;
+        int actualFormat = 0;
+        unsigned long nitems = 0;
+        unsigned long bytesAfter = 0;
+        unsigned char *data = nullptr;
+        bool found = false;
+
+        if (XGetWindowProperty(m_display, window, m_atomWmWindowType, 0, 32, False, XA_ATOM,
+                               &actualType, &actualFormat, &nitems, &bytesAfter, &data) == Success &&
+            data && actualType == XA_ATOM && actualFormat == 32) {
+            auto *atoms = reinterpret_cast<Atom *>(data);
+            for (unsigned long i = 0; i < nitems; ++i) {
+                if (atoms[i] == type) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (data)
+            XFree(data);
+
+        return found;
+    }
+
+    bool hasWindowTypeInAncestors(Window window, Atom type) const
+    {
+        Window current = window;
+        for (int depth = 0; depth < 32 && current != None && current != m_root; ++depth) {
+            if (hasWindowType(current, type))
+                return true;
+
+            Window root = None;
+            Window parent = None;
+            Window *children = nullptr;
+            unsigned int childCount = 0;
+            if (!XQueryTree(m_display, current, &root, &parent, &children, &childCount))
+                break;
+            if (children)
+                XFree(children);
+            current = parent;
+        }
+
+        return false;
+    }
+
+    bool isDesktopOrShellWindow(Window window) const
+    {
+        if (hasWindowTypeInAncestors(window, m_atomWmWindowTypeDesktop) ||
+            hasWindowTypeInAncestors(window, m_atomWmWindowTypeDock) ||
+            hasWindowTypeInAncestors(window, m_atomWmWindowTypeSplash) ||
+            hasWindowTypeInAncestors(window, m_atomWmWindowTypeNotification)) {
+            return true;
+        }
+
+        Window current = window;
+        for (int depth = 0; depth < 32 && current != None && current != m_root; ++depth) {
+            Atom actualType = None;
+            int actualFormat = 0;
+            unsigned long nitems = 0;
+            unsigned long bytesAfter = 0;
+            unsigned char *data = nullptr;
+
+            if (XGetWindowProperty(m_display, current, m_atomWmClass, 0, 64, False,
+                                   XA_STRING, &actualType, &actualFormat, &nitems, &bytesAfter, &data) == Success &&
+                data) {
+                const QByteArray wmClass(reinterpret_cast<char *>(data), static_cast<int>(nitems));
+                const QByteArray lower = wmClass.toLower();
+                const bool shellLike = lower.contains("desktop") ||
+                                       lower.contains("gnome-shell") ||
+                                       lower.contains("plasmashell");
+                XFree(data);
+                if (shellLike)
+                    return true;
+            } else if (data) {
+                XFree(data);
+            }
+
+            Window root = None;
+            Window parent = None;
+            Window *children = nullptr;
+            unsigned int childCount = 0;
+            if (!XQueryTree(m_display, current, &root, &parent, &children, &childCount))
+                break;
+            if (children)
+                XFree(children);
+            current = parent;
+        }
+
+        return false;
+    }
+
+    bool windowContainsRootPoint(Window window, int rootX, int rootY) const
+    {
+        XWindowAttributes attrs = {};
+        if (!XGetWindowAttributes(m_display, window, &attrs) || attrs.map_state == IsUnmapped)
+            return false;
+
+        int x = 0;
+        int y = 0;
+        Window child = None;
+        if (!XTranslateCoordinates(m_display, window, m_root, 0, 0, &x, &y, &child))
+            return false;
+
+        return rootX >= x && rootY >= y && rootX < x + attrs.width && rootY < y + attrs.height;
+    }
+
+    Window stackedWindowAt(int rootX, int rootY) const
+    {
+        Atom actualType = None;
+        int actualFormat = 0;
+        unsigned long nitems = 0;
+        unsigned long bytesAfter = 0;
+        unsigned char *data = nullptr;
+
+        if (XGetWindowProperty(m_display, m_root, m_atomClientListStacking, 0, 4096, False, XA_WINDOW,
+                               &actualType, &actualFormat, &nitems, &bytesAfter, &data) != Success ||
+            !data || actualType != XA_WINDOW || actualFormat != 32) {
+            if (data)
+                XFree(data);
+            return None;
+        }
+
+        auto *windows = reinterpret_cast<Window *>(data);
+        Window result = None;
+        for (long i = static_cast<long>(nitems) - 1; i >= 0; --i) {
+            const Window candidate = clientWindowFor(windows[i]);
+            if (isValidWindow(candidate) && windowContainsRootPoint(candidate, rootX, rootY)) {
+                result = candidate;
+                break;
+            }
+        }
+
+        XFree(data);
+        return result;
     }
 
     Window clientWindowFor(Window window) const
@@ -859,6 +1016,12 @@ private:
     Atom m_atomUtf8String = None;
     Atom m_atomWmClass = None;
     Atom m_atomClickThroughMarker = None;
+    Atom m_atomClientListStacking = None;
+    Atom m_atomWmWindowType = None;
+    Atom m_atomWmWindowTypeDesktop = None;
+    Atom m_atomWmWindowTypeDock = None;
+    Atom m_atomWmWindowTypeSplash = None;
+    Atom m_atomWmWindowTypeNotification = None;
 };
 
 class HotkeyThread final : public QThread {
@@ -1094,17 +1257,9 @@ static QString displayNoteTitle(const QString &title, const QString &content)
     return compactText(value, 42);
 }
 
-static QColor noteColor(int colorIndex)
+static QColor noteBackgroundColor()
 {
-    static const std::array<QColor, 5> colors = {
-        QColor(255, 248, 181),
-        QColor(220, 245, 255),
-        QColor(226, 255, 220),
-        QColor(255, 229, 235),
-        QColor(240, 233, 255),
-    };
-    const int index = std::clamp(colorIndex, 0, static_cast<int>(colors.size()) - 1);
-    return colors[static_cast<size_t>(index)];
+    return QColor(255, 255, 255);
 }
 
 class NoteStore final : public QObject {
@@ -1331,10 +1486,14 @@ public:
         setWindowFlags(Qt::Window | (m_note.pinned ? Qt::WindowStaysOnTopHint : Qt::WindowFlags()));
         setMinimumSize(300, 220);
 
-        const QColor background = noteColor(m_note.colorIndex);
+        m_note.colorIndex = 0;
+        const QColor background = noteBackgroundColor();
         setAutoFillBackground(true);
         QPalette pal = palette();
         pal.setColor(QPalette::Window, background);
+        pal.setColor(QPalette::WindowText, Qt::black);
+        pal.setColor(QPalette::Base, Qt::white);
+        pal.setColor(QPalette::Text, Qt::black);
         setPalette(pal);
 
         auto *root = new QVBoxLayout(this);
@@ -1363,9 +1522,12 @@ public:
         root->addWidget(m_contentEdit, 1);
 
         const QString editorStyle = QStringLiteral(
-            "QLineEdit, QTextEdit { background: rgba(255,255,255,180); border: 1px solid rgba(0,0,0,45); "
-            "border-radius: 4px; padding: 4px; color: #1f2933; }"
-            "QPushButton { padding: 4px 8px; }");
+            "QWidget { background: #ffffff; color: #000000; }"
+            "QLineEdit, QTextEdit { background: #ffffff; border: 1px solid #b8b8b8; "
+            "border-radius: 4px; padding: 4px; color: #000000; }"
+            "QPushButton { background: #f4f4f4; color: #000000; border: 1px solid #9c9c9c; "
+            "border-radius: 4px; padding: 4px 8px; }"
+            "QPushButton:hover { background: #e9e9e9; }");
         setStyleSheet(editorStyle);
 
         m_autosaveTimer.setSingleShot(true);
@@ -1476,7 +1638,7 @@ private:
 
         m_note.title = m_titleEdit->text().left(160);
         m_note.content = m_contentEdit->toPlainText().left(8192);
-        m_note.colorIndex = std::clamp(m_note.colorIndex, 0, 4);
+        m_note.colorIndex = 0;
         m_note.pinned = windowFlags().testFlag(Qt::WindowStaysOnTopHint);
         const QRect rect = geometry();
         m_note.x = rect.x();
