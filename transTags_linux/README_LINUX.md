@@ -2,7 +2,7 @@
 
 Ubuntu/Linux versions of transTags.
 
-The recommended version is `qt/`, implemented with C++/Qt Widgets. The `legacy/` directory keeps older experiments for reference.
+The maintained Linux version is `qt/`, implemented with C++/Qt Widgets.
 
 ## Principle
 
@@ -26,34 +26,6 @@ chmod +x install_qt_deps_ubuntu.sh build.sh run.sh install_desktop_entry.sh
 ```
 
 The Qt version requires `Ubuntu on Xorg` for full-window control. On Ubuntu's default Wayland session, a normal Qt program cannot reliably control arbitrary native windows.
-
-## Legacy X11 C Version
-
-This is kept for reference only.
-
-```bash
-cd transTags_linux/legacy/x11-c
-chmod +x install_deps_ubuntu.sh run.sh
-./install_deps_ubuntu.sh
-make
-./run.sh
-```
-
-## Legacy GNOME Shell Extension
-
-This is kept for reference and Wayland experiments.
-
-```bash
-cd transTags_linux/legacy/gnome-extension
-chmod +x install_gnome_extension.sh
-./install_gnome_extension.sh
-```
-
-Disable:
-
-```bash
-gnome-extensions disable transtags@sim.local
-```
 
 ## Hotkeys
 

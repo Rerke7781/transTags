@@ -1,11 +1,23 @@
 # transTags 中文说明
 
+[ [English](README.md) | 中文 ]
+
 transTags 是一个轻量级窗口辅助工具，用热键控制目标窗口的透明度、鼠标穿透、窗口置顶和窗口居中。
 
 项目按系统拆分：
 
 - `transTags_windows`：Windows 版本，使用 Win32 API 实现。
 - `transTags_linux`：Ubuntu/Linux 版本，主版本使用 C++/Qt Widgets + X11/XFixes/EWMH 实现。
+
+## 下载
+
+从最新 Release 选择对应系统的文件：
+
+| 系统 | 直接下载 | 说明 |
+| --- | --- | --- |
+| Windows | [transTags_windows.exe](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_windows.exe) | 单个可执行文件，下载后直接运行。 |
+| Windows 整包 | [transTags_windows.zip](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_windows.zip) | 包含 `transTags_windows.exe` 和默认 `config.ini`。 |
+| Ubuntu/Linux | [transTags_linux.zip](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_linux.zip) | Qt 版本源码包，需要在 `Ubuntu on Xorg` 下构建运行。 |
 
 ## 主要功能
 
@@ -41,7 +53,6 @@ transTags/
 |   `-- release/      Windows 本地发布文件
 |-- transTags_linux/
 |   |-- qt/           Ubuntu Qt 主版本
-|   |-- legacy/       早期实验版本，仅作参考
 |   `-- release/      Linux 本地发布文件
 |-- docs/             结构说明和 GitHub 上传说明
 |-- README.md         英文说明

@@ -65,6 +65,8 @@ transTags_windows/release/transTags_windows.zip
 transTags_linux/release/transTags_linux.zip
 ```
 
+仓库已经包含 `.github/workflows/release.yml`。推送 `v*` 标签后，GitHub Actions 会自动创建正式 GitHub Release，并把上面的 exe/zip 作为附件上传。README 的下载链接会指向最新 Release 附件。
+
 网页操作：
 
 1. 打开 GitHub 仓库页面。

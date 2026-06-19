@@ -9,6 +9,9 @@ transTags/
 |-- README.md
 |-- README_CN.md
 |-- .gitignore
+|-- .github/
+|   `-- workflows/
+|       `-- release.yml
 |-- transTags_windows/
 |   |-- source/
 |   |   |-- transTags_windows.sln
@@ -34,17 +37,6 @@ transTags/
 |   |   |-- install_qt_deps_ubuntu.sh
 |   |   |-- install_desktop_entry.sh
 |   |   `-- README.md
-|   |-- legacy/
-|   |   |-- x11-c/
-|   |   |   |-- transTags_linux.c
-|   |   |   |-- Makefile
-|   |   |   |-- install_deps_ubuntu.sh
-|   |   |   `-- run.sh
-|   |   `-- gnome-extension/
-|   |       |-- extension.js
-|   |       |-- metadata.json
-|   |       |-- install_gnome_extension.sh
-|   |       `-- schemas/
 |   |-- release/
 |   |   |-- .gitkeep
 |   |   `-- transTags_linux.zip
@@ -107,10 +99,17 @@ transTags_linux/qt/build.sh
 
 - `qt/` 是当前推荐维护版本，界面由 C++/Qt Widgets 实现。
 - Linux 窗口控制依赖 X11/XFixes/EWMH，完整功能需要 `Ubuntu on Xorg`。
-- `legacy/x11-c/` 是早期 X11 C 版本，仅保留作参考。
-- `legacy/gnome-extension/` 是早期 GNOME Shell 扩展方案，仅保留作参考。
-
 Linux Qt 版原理：Qt 负责界面，X11 负责全局热键和目标窗口查找，XFixes/XShape 负责鼠标穿透，EWMH 属性负责透明度和窗口置顶。
+
+## Release 下载入口
+
+GitHub Release 会自动上传以下文件，README 中也提供了直接下载链接：
+
+```text
+transTags_windows/release/transTags_windows.exe
+transTags_windows/release/transTags_windows.zip
+transTags_linux/release/transTags_linux.zip
+```
 
 ## GitHub 说明
 

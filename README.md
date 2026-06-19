@@ -1,11 +1,23 @@
 # transTags
 
+[ English | [中文](README_CN.md) ]
+
 transTags is a small desktop utility for making a target window transparent, click-through, always-on-top, or centered with global hotkeys.
 
 The project is split by operating system:
 
 - `transTags_windows`: Windows version, implemented with native Win32 APIs.
 - `transTags_linux`: Ubuntu/Linux version, implemented mainly with C++/Qt Widgets plus X11/XFixes/EWMH.
+
+## Download
+
+Choose the package for your system from the latest release:
+
+| System | Direct Download | Notes |
+| --- | --- | --- |
+| Windows | [transTags_windows.exe](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_windows.exe) | Single executable. Download and run directly. |
+| Windows package | [transTags_windows.zip](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_windows.zip) | Contains `transTags_windows.exe` and default `config.ini`. |
+| Ubuntu/Linux | [transTags_linux.zip](https://github.com/Rerke7781/transTags/releases/latest/download/transTags_linux.zip) | Source package for the Qt version. Build and run on `Ubuntu on Xorg`. |
 
 ## Features
 
@@ -41,14 +53,11 @@ transTags/
 |   `-- release/
 |-- transTags_linux/
 |   |-- qt/
-|   |-- legacy/
 |   `-- release/
 `-- docs/
 ```
 
 See `docs/FILE_STRUCTURE.md` for the full structure.
-
-Chinese documentation: `README_CN.md`.
 
 ## Build: Windows
 
